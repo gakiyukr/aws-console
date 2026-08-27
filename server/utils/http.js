@@ -23,6 +23,25 @@ export function errorResponse(status, message) {
 }
 
 /**
+ * 同時讀取 Workers Headers 與 Nitro Node 型標頭物件。
+ * Cloudflare Worker 預設使用 Headers，但 Nitro 路由的 event.node.req.headers
+ * 是小寫鍵名的普通物件；統一在此轉換可避免認證流程依執行期而失效。
+ */
+export function getHeaderValue(headers, name) {
+  if (!headers) {
+    return "";
+  }
+  if (typeof headers.get === "function") {
+    return headers.get(name) || "";
+  }
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value.join(", ");
+  }
+  return value === undefined ? "" : String(value);
+}
+
+/**
  * 建立 SSE 回應。onStart 接收一個 emit(event, data) 函式，
  * 以 event: progress|result|error + data: {JSON} 的格式推送，
  * 事件間以空行分隔（SSE 標準）。
@@ -73,18 +92,26 @@ export function sseResponse(onStart) {
  * 本機開發依序退回 X-Forwarded-For / X-Real-IP / unknown。
  */
 export function getClientIp(headers) {
+  const forwardedFor = getHeaderValue(headers, "x-forwarded-for");
   return (
-    headers.get("cf-connecting-ip")
-    || headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    || headers.get("x-real-ip")
+    getHeaderValue(headers, "cf-connecting-ip")
+    || forwardedFor.split(",")[0]?.trim()
+    || getHeaderValue(headers, "x-real-ip")
     || "unknown"
   );
 }
 
-/** 解析 JSON request body；格式錯誤回 null，由呼叫端決定錯誤語意。 */
-export async function readJsonBody(request) {
+/**
+ * 解析 JSON 請求內容；格式錯誤回 null，由呼叫端決定錯誤語意。
+ * Nuxt 路由傳入的是 H3 event，必須由 readBody 讀取；保留 Fetch Request
+ * 分支讓工具函式可在 Workers 風格呼叫端與單元測試中重用。
+ */
+export async function readJsonBody(event) {
   try {
-    return await request.json();
+    if (typeof event?.json === "function") {
+      return await event.json();
+    }
+    return await readBody(event);
   } catch {
     return null;
   }

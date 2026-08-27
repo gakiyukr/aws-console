@@ -23,22 +23,25 @@ pnpm build
 pnpm dev:worker
 ```
 
+`pnpm dev:worker` 與 `pnpm deploy` 都會先檢查 `CLOUDFLARE_D1_DATABASE_ID`，避免啟動缺少 `DB` binding 的 Worker。
+
 ## Cloudflare 部署
 
-先建立 D1 資料庫，將取得的資料庫 ID 設為 `CLOUDFLARE_D1_DATABASE_ID`，並依需要調整 Worker 與資料庫名稱：
+先建立 D1 資料庫，將取得的資料庫 ID 設為 `CLOUDFLARE_D1_DATABASE_ID`，並依需要調整 Worker 與資料庫名稱。設定完成後建立 Worker 產物並套用 migration：
 
 ```bash
 pnpm exec wrangler d1 create aws-console
-pnpm exec wrangler d1 migrations apply aws-console --remote --migrations-dir server/db/migrations
+pnpm build
+pnpm exec wrangler --config .output/server/wrangler.json d1 migrations apply DB --remote
 ```
 
 正式環境的敏感設定必須使用 Cloudflare secrets，不應寫入 `.env` 或版本庫：
 
 ```bash
-pnpm exec wrangler secret put APP_PASSWORD
-pnpm exec wrangler secret put SESSION_SECRET
-pnpm exec wrangler secret put AWS_ACCESS_KEY_ID
-pnpm exec wrangler secret put AWS_SECRET_ACCESS_KEY
+pnpm exec wrangler --config .output/server/wrangler.json secret put APP_PASSWORD
+pnpm exec wrangler --config .output/server/wrangler.json secret put SESSION_SECRET
+pnpm exec wrangler --config .output/server/wrangler.json secret put AWS_ACCESS_KEY_ID
+pnpm exec wrangler --config .output/server/wrangler.json secret put AWS_SECRET_ACCESS_KEY
 ```
 
 完成 D1 與 secrets 設定後執行：

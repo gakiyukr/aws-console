@@ -11,6 +11,7 @@ const d1Databases = cloudflareD1DatabaseId
       binding: 'DB',
       database_name: cloudflareD1DatabaseName,
       database_id: cloudflareD1DatabaseId,
+      migrations_dir: '../../server/db/migrations',
     }]
   : [];
 

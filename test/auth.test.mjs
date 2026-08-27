@@ -126,6 +126,16 @@ describe("cookie 解析與建構", () => {
     assert.equal(getCsrfTokenFromRequest(request), "token-1");
   });
 
+  it("支援 Nitro 的 Node 型請求標頭物件", () => {
+    const request = {
+      headers: {
+        cookie: "ec2_session=session-1; ec2_csrf=csrf-1",
+      },
+    };
+    assert.equal(getSessionFromRequest(request), "session-1");
+    assert.equal(getCsrfTokenFromRequest(request), "csrf-1");
+  });
+
   it("cookie 缺失時回 null", () => {
     const request = new Request("https://console.example/");
     assert.equal(getSessionFromRequest(request), null);

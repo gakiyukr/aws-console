@@ -41,8 +41,8 @@
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",
-    "dev:worker": "pnpm build && wrangler --cwd .output dev",
-    "deploy": "pnpm run verify:deploy && pnpm build && wrangler --cwd .output deploy",
+    "dev:worker": "pnpm run verify:deploy && pnpm build && wrangler --config .output/server/wrangler.json dev",
+    "deploy": "pnpm run verify:deploy && pnpm build && wrangler --config .output/server/wrangler.json deploy",
     "verify:deploy": "node scripts/verify-deploy-config.mjs",
     "generate": "nuxt generate",
     "preview": "nuxt preview",

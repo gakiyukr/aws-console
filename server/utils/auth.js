@@ -2,6 +2,7 @@
 // 移植自 wavelength 主控台（含 passwordHash 機制——改密碼即全數
 // session 失效），session 時長採電源主控台的 24 小時。
 // 全函式為純模組，依賴僅 Web Crypto，node --test 可直接驗證。
+import { getHeaderValue } from "./http.js";
 
 export const SESSION_COOKIE = "ec2_session";
 export const CSRF_COOKIE = "ec2_csrf";
@@ -135,7 +136,7 @@ export async function verifySessionValue(sessionValue, secret, expectedPassword,
 
 /** 自 Cookie 標頭解析指定名稱的值（decodeURIComponent 還原簽章內的特殊字元）。 */
 function getCookieValue(request, name) {
-  const cookieHeader = request.headers.get("cookie") || "";
+  const cookieHeader = getHeaderValue(request?.headers, "cookie");
   const cookies = cookieHeader.split(/;\s*/).filter(Boolean);
   for (const cookie of cookies) {
     const [key, ...rest] = cookie.split("=");
