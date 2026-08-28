@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { NavGroup, NavLink, NavSectionTitle } from '~/types/nav'
-import { navMenu, navMenuBottom } from '~/constants/menus'
+import { navMenu } from '~/constants/menus'
 
 function resolveNavItemComponent(item: NavLink | NavGroup | NavSectionTitle): any {
   if ('children' in item)
@@ -8,6 +8,8 @@ function resolveNavItemComponent(item: NavLink | NavGroup | NavSectionTitle): an
 
   return resolveComponent('LayoutSidebarNavLink')
 }
+
+const { logout } = useLogout()
 
 const { data: session } = useFetch<{ authenticated: boolean, user: { username: string, role: string } | null }>('/api/session')
 const user = computed(() => ({
@@ -36,7 +38,14 @@ const user = computed(() => ({
         <component :is="resolveNavItemComponent(item)" v-for="(item, index) in nav.items" :key="index" :item="item" />
       </SidebarGroup>
       <SidebarGroup class="mt-auto">
-        <component :is="resolveNavItemComponent(item)" v-for="(item, index) in navMenuBottom" :key="index" :item="item" size="sm" />
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton size="sm" tooltip="登出" @click="logout">
+              <Icon name="i-lucide-log-out" />
+              <span>登出</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>
     <SidebarFooter>

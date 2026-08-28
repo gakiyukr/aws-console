@@ -1,5 +1,7 @@
-import type { NavMenu, NavMenuItems } from '~/types/nav'
+import type { NavMenu } from '~/types/nav'
 
+// 登出不在此清單：側邊欄底部與頁尾下拉的登出皆呼叫 useLogout()，
+// 經 POST /api/logout 清除 session 後導回登入頁。
 export const navMenu: NavMenu[] = [
   {
     heading: '主控台',
@@ -30,13 +32,5 @@ export const navMenu: NavMenu[] = [
         link: '/accounts',
       },
     ],
-  },
-]
-
-export const navMenuBottom: NavMenuItems = [
-  {
-    title: '登出',
-    icon: 'i-lucide-log-out',
-    link: '/logout',
   },
 ]

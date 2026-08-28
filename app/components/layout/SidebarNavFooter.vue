@@ -10,17 +10,7 @@ defineProps<{
 }>()
 
 const { isMobile, setOpenMobile } = useSidebar()
-
-// 登出：呼叫後端清除 session cookie，成功後導向登入頁
-async function handleLogout() {
-  try {
-    await $fetch('/api/logout', { method: 'POST' })
-  }
-  catch {
-    // 即使請求失敗仍導向登入頁，避免卡在無效 session 的畫面
-  }
-  await navigateTo('/login')
-}
+const { logout } = useLogout()
 </script>
 
 <template>
@@ -72,7 +62,7 @@ async function handleLogout() {
             </NuxtLink>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem @click="handleLogout">
+          <DropdownMenuItem @click="logout">
             <Icon name="i-lucide-log-out" />
             登出
           </DropdownMenuItem>

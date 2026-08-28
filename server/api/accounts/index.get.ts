@@ -1,7 +1,7 @@
 import { listAwsAccounts } from "../../utils/db.js";
 import { jsonResponse } from "../../utils/http.js";
 
-function publicAccount(account) {
+function publicAccount(account: Record<string, unknown>) {
   const { credentialCiphertext, credentialIv, ...safe } = account;
   return safe;
 }

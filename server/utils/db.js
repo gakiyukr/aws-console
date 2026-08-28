@@ -229,6 +229,11 @@ function normalizeUser(row) {
   return row ? { ...row, enabled: Boolean(row.enabled) } : null;
 }
 
+/**
+ * 取得全部主控台使用者（依 id 排序）。
+ * @param {D1Database} db
+ * @returns {Promise<Array<{id:number, username:string, passwordHash:string, passwordSalt:string, passwordIterations:number, role:string, enabled:boolean, authVersion:number, createdAt:string, updatedAt:string}>>}
+ */
 export async function listUsers(db) {
   const { results } = await db.prepare(`SELECT ${USER_COLUMNS} FROM users ORDER BY id`).all();
   return results.map(normalizeUser);
