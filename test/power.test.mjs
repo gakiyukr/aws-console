@@ -8,6 +8,7 @@ import { createDb } from "./d1-stub.js";
 import {
   buildRegionGroups,
   deriveIpFromPublicDns,
+  listRegionInstances,
   mergeMachineStates,
   parseDescribeInstancesXml,
   parseDescribeInstancesXmlItems,
@@ -107,6 +108,31 @@ describe("parseDescribeInstancesXmlItems", () => {
     const items = parseDescribeInstancesXmlItems(SAMPLE_INSTANCES_XML);
     assert.equal(items[1].isWlInstance, true);
     assert.equal(items[1].publicIpAddress, "203.0.113.20");
+  });
+
+  it("以 placement zoneId 含 -wl 段偵測 Wavelength", () => {
+    const xml = `
+<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <reservationSet>
+    <item>
+      <instancesSet>
+        <item>
+          <instanceId>i-0wlzone00000001</instanceId>
+          <instanceState><code>0</code><name>pending</name></instanceState>
+          <placement><availabilityZone>us-east-1-wl1-bos-wlz-1</availabilityZone><zoneId>us-east-1-wl1-bos-wlz-1</zoneId></placement>
+        </item>
+        <item>
+          <instanceId>i-0regional000001</instanceId>
+          <instanceState><code>16</code><name>running</name></instanceState>
+          <placement><availabilityZone>us-east-1a</availabilityZone><zoneId>use1-az4</zoneId></placement>
+        </item>
+      </instancesSet>
+    </item>
+  </reservationSet>
+</DescribeInstancesResponse>`;
+    const items = parseDescribeInstancesXmlItems(xml);
+    assert.equal(items[0].isWlInstance, true);
+    assert.equal(items[1].isWlInstance, false);
   });
 });
 
@@ -259,5 +285,96 @@ describe("電源操作日誌", () => {
     const failures = await listOperationLogs(db, { status: "failure" });
     assert.equal(failures.length, 1);
     assert.equal(failures[0].detail, "throttled");
+  });
+});
+
+// ── listRegionInstances（新增機器候選清單） ──────────────────
+
+describe("listRegionInstances", () => {
+  it("列出執行個體並過濾 shutting-down 與 terminated", async () => {
+    const xml = `
+<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <reservationSet>
+    <item>
+      <instancesSet>
+        <item>
+          <instanceId>i-0abc123def4567890</instanceId>
+          <instanceState><code>16</code><name>running</name></instanceState>
+          <tagSet><item><key>Name</key><value>web-1</value></item></tagSet>
+        </item>
+        <item>
+          <instanceId>i-0shuttingdown00</instanceId>
+          <instanceState><code>32</code><name>shutting-down</name></instanceState>
+        </item>
+        <item>
+          <instanceId>i-0terminated00000</instanceId>
+          <instanceState><code>48</code><name>terminated</name></instanceState>
+        </item>
+        <item>
+          <instanceId>i-0stopped0000001</instanceId>
+          <instanceState><code>80</code><name>stopped</name></instanceState>
+        </item>
+      </instancesSet>
+    </item>
+  </reservationSet>
+</DescribeInstancesResponse>`;
+    const env = makeEnv({
+      fetch: async (_url, init) => {
+        assert.equal(readAction(init), "DescribeInstances");
+        return makeXmlResponse(xml);
+      },
+    });
+
+    const instances = await listRegionInstances(env, "us-east-1");
+    assert.deepEqual(
+      instances.map((item) => item.instanceId),
+      ["i-0stopped0000001", "i-0abc123def4567890"],
+    );
+    assert.deepEqual(instances[1], {
+      instanceId: "i-0abc123def4567890",
+      name: "web-1",
+      state: "running",
+      isWavelength: false,
+    });
+    assert.equal(instances[0].name, "");
+  });
+
+  it("以 Name 標籤排序，無標籤時退回執行個體 ID", async () => {
+    const xml = `
+<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <reservationSet>
+    <item>
+      <instancesSet>
+        <item>
+          <instanceId>i-0b00000000000000</instanceId>
+          <instanceState><code>16</code><name>running</name></instanceState>
+        </item>
+        <item>
+          <instanceId>i-0a00000000000000</instanceId>
+          <instanceState><code>16</code><name>running</name></instanceState>
+          <tagSet><item><key>Name</key><value>alpha</value></item></tagSet>
+        </item>
+      </instancesSet>
+    </item>
+  </reservationSet>
+</DescribeInstancesResponse>`;
+    const env = makeEnv({ fetch: async () => makeXmlResponse(xml) });
+
+    const instances = await listRegionInstances(env, "us-east-1");
+    assert.deepEqual(
+      instances.map((item) => item.instanceId),
+      ["i-0a00000000000000", "i-0b00000000000000"],
+    );
+  });
+
+  it("AWS 錯誤時拋出，由路由層轉為 HTTP 回應", async () => {
+    const env = makeEnv({
+      fetch: async () => makeXmlResponse("<ErrorResponse><Errors><Error><Code>UnauthorizedOperation</Code><Message>denied</Message></Error></Errors></ErrorResponse>", 403),
+    });
+
+    await assert.rejects(
+      () => listRegionInstances(env, "us-east-1"),
+      /denied/,
+    );
   });
 });

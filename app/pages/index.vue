@@ -20,13 +20,25 @@ interface MachineRow {
   awsAccountName: string | null
 }
 
-interface AwsAccountOption { id: number, name: string, enabled: boolean, isDefault: boolean }
+interface AwsAccountOption {
+  id: number
+  name: string
+  enabled: boolean
+  isDefault: boolean
+}
+
+// GET /api/ec2/instances 回傳的候選執行個體
+interface InstanceOption {
+  instanceId: string
+  name: string
+  state: string
+  isWavelength: boolean
+}
 
 const machines = ref<MachineRow[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
 const actionPendingId = ref<number | null>(null)
-const accounts = ref<AwsAccountOption[]>([])
 
 // 統計卡片資料
 const stats = computed(() => {
@@ -101,10 +113,91 @@ async function confirmStop() {
     await performAction(machine, 'stop')
 }
 
-// 新增機器對話框
+// 新增機器對話框：帳號 → Region → 執行個體 三層下拉，
+// 執行個體由後端 DescribeInstances 即時列出，名稱自 Name 標籤帶入。
 const showAddDialog = ref(false)
 const addForm = ref<{ awsAccountId: number | null, region: string, instanceId: string, name: string, isWavelength: boolean }>({ awsAccountId: null, region: '', instanceId: '', name: '', isWavelength: false })
 const adding = ref(false)
+const accounts = ref<AwsAccountOption[]>([])
+const regions = ref<string[]>([])
+const instances = ref<InstanceOption[]>([])
+const loadingAccounts = ref(false)
+const loadingRegions = ref(false)
+const loadingInstances = ref(false)
+
+async function openAddDialog() {
+  showAddDialog.value = true
+  if (accounts.value.length)
+    return
+  loadingAccounts.value = true
+  try {
+    const payload = await $fetch<{ accounts: AwsAccountOption[] }>('/api/accounts')
+    accounts.value = payload.accounts.filter(account => account.enabled)
+    addForm.value.awsAccountId = accounts.value.find(account => account.isDefault)?.id || accounts.value[0]?.id || null
+    if (addForm.value.awsAccountId)
+      await loadAddRegions(addForm.value.awsAccountId)
+  }
+  catch (error: any) {
+    toast.error(error?.data?.error || '載入 AWS 帳號失敗')
+  }
+  finally {
+    loadingAccounts.value = false
+  }
+}
+
+async function loadAddRegions(accountId: number | null) {
+  regions.value = []
+  instances.value = []
+  Object.assign(addForm.value, { region: '', instanceId: '', name: '', isWavelength: false })
+  if (!accountId)
+    return
+  loadingRegions.value = true
+  const requestedAccount = accountId
+  try {
+    const payload = await $fetch<{ regions: string[] }>('/api/ec2/regions', {
+      query: { account_id: accountId },
+    })
+    if (addForm.value.awsAccountId === requestedAccount)
+      regions.value = payload.regions || []
+  }
+  catch (error: any) {
+    toast.error(error?.data?.error || '載入 Region 失敗')
+  }
+  finally {
+    if (addForm.value.awsAccountId === requestedAccount)
+      loadingRegions.value = false
+  }
+}
+
+async function loadAddInstances(region: string) {
+  instances.value = []
+  Object.assign(addForm.value, { instanceId: '', name: '', isWavelength: false })
+  if (!addForm.value.awsAccountId || !region)
+    return
+  loadingInstances.value = true
+  const requestedRegion = region
+  try {
+    const payload = await $fetch<{ instances: InstanceOption[] }>('/api/ec2/instances', {
+      query: { account_id: addForm.value.awsAccountId, region },
+    })
+    if (addForm.value.region === requestedRegion)
+      instances.value = payload.instances || []
+  }
+  catch (error: any) {
+    toast.error(error?.data?.error || '載入執行個體清單失敗')
+  }
+  finally {
+    if (addForm.value.region === requestedRegion)
+      loadingInstances.value = false
+  }
+}
+
+// 選定執行個體後以 Name 標籤帶入顯示名稱，並記下 Wavelength 偵測結果
+watch(() => addForm.value.instanceId, (instanceId) => {
+  const instance = instances.value.find(item => item.instanceId === instanceId)
+  addForm.value.name = instance?.name || ''
+  addForm.value.isWavelength = instance?.isWavelength ?? false
+})
 
 async function submitAdd() {
   if (adding.value)
@@ -118,7 +211,7 @@ async function submitAdd() {
     })
     toast.success('機器已新增')
     showAddDialog.value = false
-    addForm.value = { awsAccountId: accounts.value.find(account => account.isDefault)?.id || null, region: '', instanceId: '', name: '', isWavelength: false }
+    Object.assign(addForm.value, { region: '', instanceId: '', name: '', isWavelength: false })
     await loadMachines()
   }
   catch (error: any) {
@@ -179,17 +272,7 @@ async function copyText(text: string) {
   toast.success('已複製到剪貼簿')
 }
 
-onMounted(async () => {
-  try {
-    const payload = await $fetch<{ accounts: AwsAccountOption[] }>('/api/accounts')
-    accounts.value = payload.accounts.filter(account => account.enabled)
-    addForm.value.awsAccountId = accounts.value.find(account => account.isDefault)?.id || accounts.value[0]?.id || null
-  }
-  catch {
-    toast.error('載入 AWS 帳號失敗')
-  }
-  await loadMachines()
-})
+onMounted(loadMachines)
 </script>
 
 <template>
@@ -204,14 +287,14 @@ onMounted(async () => {
         </p>
       </div>
       <div class="flex items-center gap-2">
+        <Button size="sm" :disabled="adding" @click="openAddDialog">
+          <Plus class="mr-1 h-4 w-4" />
+          新增機器
+        </Button>
         <Button variant="outline" size="sm" :disabled="refreshing" @click="refresh">
           <Loader2 v-if="refreshing" class="mr-1 h-4 w-4 animate-spin" />
           <RefreshCw v-else class="mr-1 h-4 w-4" />
           重新整理
-        </Button>
-        <Button size="sm" @click="showAddDialog = true">
-          <Plus class="mr-1 h-4 w-4" />
-          新增機器
         </Button>
       </div>
     </div>
@@ -257,12 +340,8 @@ onMounted(async () => {
           <Loader2 class="mr-2 h-5 w-5 animate-spin" />
           載入中…
         </div>
-        <div v-else-if="machines.length === 0" class="flex flex-col items-center gap-3 py-12 text-muted-foreground">
+        <div v-else-if="machines.length === 0" class="py-12 text-center text-muted-foreground">
           <p>清單中還沒有機器。</p>
-          <Button variant="outline" size="sm" @click="showAddDialog = true">
-            <Plus class="mr-1 h-4 w-4" />
-            新增第一台機器
-          </Button>
         </div>
         <Table v-else>
           <TableHeader>
@@ -375,15 +454,21 @@ onMounted(async () => {
         <DialogHeader>
           <DialogTitle>新增機器</DialogTitle>
           <DialogDescription>
-            將既有 EC2 執行個體加入管理清單（儲存於 D1）
+            從 AWS 帳號選擇既有 EC2 執行個體加入管理清單（儲存於 D1）
           </DialogDescription>
         </DialogHeader>
         <div class="grid gap-4 py-2">
           <div class="grid gap-2">
             <Label for="add-account">AWS 帳號</Label>
-            <select id="add-account" v-model.number="addForm.awsAccountId" class="h-9 rounded-md border bg-background px-3 text-sm">
+            <select
+              id="add-account"
+              v-model.number="addForm.awsAccountId"
+              class="h-9 rounded-md border bg-background px-3 text-sm"
+              :disabled="loadingAccounts || adding"
+              @change="loadAddRegions(addForm.awsAccountId)"
+            >
               <option :value="null" disabled>
-                請選擇 AWS 帳號
+                {{ loadingAccounts ? '載入中...' : (accounts.length ? '請選擇 AWS 帳號' : '尚無可用帳號，請先至帳號管理新增') }}
               </option>
               <option v-for="account in accounts" :key="account.id" :value="account.id">
                 {{ account.name }}{{ account.isDefault ? '（預設）' : '' }}
@@ -392,19 +477,39 @@ onMounted(async () => {
           </div>
           <div class="grid gap-2">
             <Label for="add-region">地區</Label>
-            <Input
+            <select
               id="add-region"
               v-model="addForm.region"
-              placeholder="us-east-1"
-            />
+              class="h-9 rounded-md border bg-background px-3 text-sm"
+              :disabled="!addForm.awsAccountId || loadingRegions || adding"
+              @change="loadAddInstances(addForm.region)"
+            >
+              <option value="">
+                {{ loadingRegions ? '載入中...' : '請選擇地區' }}
+              </option>
+              <option v-for="region in regions" :key="region" :value="region">
+                {{ region }}
+              </option>
+            </select>
           </div>
           <div class="grid gap-2">
-            <Label for="add-instance-id">執行個體 ID</Label>
-            <Input
-              id="add-instance-id"
+            <Label for="add-instance">執行個體</Label>
+            <select
+              id="add-instance"
               v-model="addForm.instanceId"
-              placeholder="i-0abc123def4567890"
-            />
+              class="h-9 rounded-md border bg-background px-3 text-sm"
+              :disabled="!addForm.region || loadingInstances || adding"
+            >
+              <option value="">
+                {{ loadingInstances ? '載入中...' : (instances.length ? '請選擇執行個體' : '此地區沒有執行個體') }}
+              </option>
+              <option v-for="instance in instances" :key="instance.instanceId" :value="instance.instanceId">
+                {{ instance.name || instance.instanceId }}（{{ instance.instanceId }}，{{ stateLabel(instance.state) }}）
+              </option>
+            </select>
+            <p v-if="addForm.isWavelength" class="text-xs text-muted-foreground">
+              偵測為 Wavelength 執行個體，加入後將標記 WL。
+            </p>
           </div>
           <div class="grid gap-2">
             <Label for="add-name">顯示名稱</Label>
@@ -412,15 +517,8 @@ onMounted(async () => {
               id="add-name"
               v-model="addForm.name"
               placeholder="SEA-1"
+              :disabled="adding"
             />
-          </div>
-          <div class="flex items-center gap-2">
-            <Checkbox
-              id="add-wavelength"
-              :model-value="addForm.isWavelength"
-              @update:model-value="addForm.isWavelength = $event === true"
-            />
-            <Label for="add-wavelength">Wavelength 執行個體</Label>
           </div>
         </div>
         <DialogFooter>

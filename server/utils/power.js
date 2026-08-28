@@ -64,7 +64,13 @@ export function parseDescribeInstancesXmlItems(xml) {
     const publicDnsName = findTagValue(segment, "dnsName");
     const awsPublicIpAddress = findTagValue(segment, "ipAddress");
     const derivedPublicIpAddress = deriveIpFromPublicDns(publicDnsName);
-    const isWlInstance = Boolean(publicDnsName && !awsPublicIpAddress && derivedPublicIpAddress);
+    // Wavelength Zone 的 ZoneId 固定含 -wl 段，即使尚未取得公網 DNS
+    // 也能由此判定；與 DNS 形態判斷互補，兩者任一成立即視為 Wavelength。
+    const zoneId = findTagValue(segment, "zoneId");
+    const isWlInstance = Boolean(
+      (publicDnsName && !awsPublicIpAddress && derivedPublicIpAddress)
+      || zoneId.includes("-wl"),
+    );
     return {
       instanceId: match[1],
       state: findTagValue(segment, "name"),
@@ -173,6 +179,24 @@ export async function mergeMachineStates(env, machines) {
       isWavelength: Boolean(machine.isWavelength || live.isWlInstance),
     };
   });
+}
+
+/**
+ * 列出單一地區的全部執行個體，供「新增機器」挑選既有機器使用。
+ * DescribeInstances 預設即排除 terminated，此處再過濾 shutting-down，
+ * 讓挑選器不出現即將消失的執行個體；AWS 錯誤直接拋出，由路由層轉換。
+ */
+export async function listRegionInstances(env, region) {
+  const xml = await ec2Query(region, env, "DescribeInstances", {});
+  return parseDescribeInstancesXmlItems(xml)
+    .filter(item => item.instanceId && item.state !== "shutting-down" && item.state !== "terminated")
+    .map(item => ({
+      instanceId: item.instanceId,
+      name: item.awsNameTag,
+      state: item.state,
+      isWavelength: item.isWlInstance,
+    }))
+    .sort((left, right) => (left.name || left.instanceId).localeCompare(right.name || right.instanceId));
 }
 
 /**
