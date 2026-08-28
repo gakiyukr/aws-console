@@ -5,6 +5,7 @@
 import { appendOperationLog } from "../../utils/db.js";
 import { errorResponse, jsonResponse, readJsonBody } from "../../utils/http.js";
 import { initializeWavelengthZone, toHttpError } from "../../utils/wavelength.js";
+import { resolveAwsAccount } from "../../utils/aws-account.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
@@ -26,8 +27,17 @@ export default defineEventHandler(async (event) => {
     return errorResponse(400, vpcValidation.error);
   }
 
+  let accountContext;
   try {
-    const result = await initializeWavelengthZone(env, body);
+    accountContext = await resolveAwsAccount(env, body.account_id);
+  } catch (error) {
+    const httpError = toHttpError(error);
+    return jsonResponse(httpError.body, { status: httpError.status });
+  }
+  const { account, awsEnv } = accountContext;
+
+  try {
+    const result = await initializeWavelengthZone(awsEnv, body);
     try {
       await appendOperationLog(env.DB, {
         action: "init_zone",
@@ -35,6 +45,7 @@ export default defineEventHandler(async (event) => {
         instanceId: null,
         status: "success",
         detail: `已初始化 ${body.zone}`,
+        awsAccountId: account.id,
       });
     } catch {
       // 日誌寫入失敗不影響成功回應
@@ -49,6 +60,7 @@ export default defineEventHandler(async (event) => {
         instanceId: null,
         status: "failure",
         detail: httpError.body?.error || String(error),
+        awsAccountId: account.id,
       });
     } catch {
       // 日誌寫入失敗不影響錯誤回應

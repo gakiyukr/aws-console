@@ -5,8 +5,9 @@
 import { appendOperationLog } from "../../utils/db.js";
 import { registerDeploymentMachines } from "../../utils/deployment-registration.js";
 import { summarizeDeployResult } from "../../utils/deploy-log.js";
-import { errorResponse, readJsonBody, sseResponse } from "../../utils/http.js";
+import { errorResponse, jsonResponse, readJsonBody, sseResponse } from "../../utils/http.js";
 import { deployWavelengthInstance, toHttpError } from "../../utils/wavelength.js";
+import { resolveAwsAccount } from "../../utils/aws-account.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
@@ -35,13 +36,21 @@ export default defineEventHandler(async (event) => {
   if (!osValidation.valid) {
     return errorResponse(400, osValidation.error);
   }
+  let accountContext;
+  try {
+    accountContext = await resolveAwsAccount(env, body.account_id);
+  } catch (error) {
+    const httpError = toHttpError(error);
+    return jsonResponse(httpError.body, { status: httpError.status });
+  }
+  const { account, awsEnv } = accountContext;
 
   return sseResponse(async (emit) => {
     try {
-      const result = await deployWavelengthInstance(env, body, (stage, details = {}) => {
+      const result = await deployWavelengthInstance(awsEnv, body, (stage, details = {}) => {
         emit("progress", { stage, ...details });
       });
-      const management = await registerDeploymentMachines(env.DB, "wavelength", body.region, result);
+      const management = await registerDeploymentMachines(env.DB, "wavelength", body.region, result, account.id);
       const response = { ...result, management };
       try {
         await appendOperationLog(env.DB, {
@@ -50,6 +59,7 @@ export default defineEventHandler(async (event) => {
           instanceId: result.instance_id,
           status: "success",
           detail: summarizeDeployResult(response),
+          awsAccountId: account.id,
         });
       } catch {
         // 日誌寫入失敗不影響成功結果
@@ -64,6 +74,7 @@ export default defineEventHandler(async (event) => {
           instanceId: null,
           status: "failure",
           detail: httpError.body?.error || String(error),
+          awsAccountId: account.id,
         });
       } catch {
         // 日誌寫入失敗不影響錯誤事件

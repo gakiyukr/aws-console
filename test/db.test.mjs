@@ -6,14 +6,19 @@ import { describe, it } from "node:test";
 import {
   LOGIN_FAILURE_LIMIT,
   appendOperationLog,
+  createAwsAccount,
   clearLoginFailures,
   createMachine,
+  createUser,
+  deleteAwsAccount,
   deleteMachine,
   getLoginBlockState,
   getMachineById,
+  getUserByUsername,
   listMachines,
   listOperationLogs,
   recordLoginFailure,
+  updateUser,
 } from "../server/utils/db.js";
 import { createDb } from "./d1-stub.js";
 
@@ -95,6 +100,64 @@ describe("operation_log", () => {
 
     const invalidLimit = await listOperationLogs(db, { limit: "not-a-number" });
     assert.equal(invalidLimit.length, 5);
+  });
+});
+
+describe("AWS 帳號與資料關聯", () => {
+  const encrypted = {
+    credentialCiphertext: "ciphertext",
+    credentialIv: "iv",
+    accessKeyHint: "1234",
+    encryptionKeyVersion: 1,
+  };
+
+  it("第一個帳號自動成為預設並接管舊機器", async () => {
+    const db = createDb();
+    await createMachine(db, { region: "us-west-2", instanceId: "i-legacy", name: "舊機器", isWavelength: false });
+    const account = await createAwsAccount(db, { name: "正式帳號", ...encrypted, enabled: true });
+    assert.equal(account.isDefault, true);
+    assert.equal((await listMachines(db))[0].awsAccountId, account.id);
+  });
+
+  it("帳號名稱不可重複，且仍有機器時不可刪除", async () => {
+    const db = createDb();
+    const account = await createAwsAccount(db, { name: "正式帳號", ...encrypted, enabled: true });
+    assert.equal(await createAwsAccount(db, { name: "正式帳號", ...encrypted, enabled: true }), null);
+    const machine = await createMachine(db, { awsAccountId: account.id, region: "us-east-1", instanceId: "i-1", name: "A", isWavelength: false });
+    assert.equal((await deleteAwsAccount(db, account.id)).reason, "in_use");
+    await deleteMachine(db, machine.id);
+    assert.equal((await deleteAwsAccount(db, account.id)).deleted, true);
+  });
+
+  it("操作日誌可依 AWS 帳號篩選", async () => {
+    const db = createDb();
+    await appendOperationLog(db, { awsAccountId: 1, action: "start", status: "success" });
+    await appendOperationLog(db, { awsAccountId: 2, action: "stop", status: "success" });
+    const logs = await listOperationLogs(db, { awsAccountId: 2 });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].awsAccountId, 2);
+  });
+});
+
+describe("主控台使用者", () => {
+  it("使用者可建立、查詢並以 authVersion 撤銷 session", async () => {
+    const db = createDb();
+    const user = await createUser(db, {
+      username: "admin",
+      passwordHash: "hash",
+      passwordSalt: "salt",
+      passwordIterations: 1000,
+      role: "admin",
+      enabled: true,
+    });
+    assert.equal((await getUserByUsername(db, "admin")).id, user.id);
+    const updated = await updateUser(db, user.id, {
+      ...user,
+      passwordHash: "new-hash",
+      invalidateSessions: true,
+    });
+    assert.equal(updated.authVersion, 2);
+    assert.equal(updated.passwordHash, "new-hash");
   });
 });
 

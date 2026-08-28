@@ -86,11 +86,18 @@ export async function constantTimeCompare(a, b) {
 }
 
 /**
- * 建立 session 值：payload 為 base64url 的 JSON（密碼雜湊 + 簽發時間），
- * 以 SESSION_SECRET 的 HMAC-SHA256 簽章。payload 綁定密碼雜湊使
- * 更換 APP_PASSWORD 後所有既有 session 立即失效。
+ * 建立 session 值。正式登入傳入 userId 與 authVersion；字串輸入只保留
+ * 給舊版純函式呼叫相容。兩種 payload 都以 SESSION_SECRET 簽章。
  */
 export async function createSessionValue(password, secret, now = Date.now()) {
+  if (password && typeof password === "object") {
+    const payload = toBase64Url(JSON.stringify({
+      userId: Number(password.userId),
+      authVersion: Number(password.authVersion),
+      issuedAt: now,
+    }));
+    return `${payload}.${await signText(payload, secret)}`;
+  }
   const payload = toBase64Url(
     JSON.stringify({
       passwordHash: await sha256Base64Url(password),
@@ -99,6 +106,25 @@ export async function createSessionValue(password, secret, now = Date.now()) {
   );
   const signature = await signText(payload, secret);
   return `${payload}.${signature}`;
+}
+
+/** 驗證簽章與時效後讀取 session payload；不在此層查詢 D1。 */
+export async function parseSessionValue(sessionValue, secret, now = Date.now()) {
+  if (!sessionValue || !sessionValue.includes(".") || !secret)
+    return null;
+  const [payload, signature] = sessionValue.split(".", 2);
+  if (!(await constantTimeCompare(signature, await signText(payload, secret))))
+    return null;
+  try {
+    const parsed = JSON.parse(fromBase64Url(payload));
+    const issuedAt = Number(parsed.issuedAt);
+    const ageMs = now - issuedAt;
+    if (!Number.isFinite(issuedAt) || ageMs < 0 || ageMs > SESSION_MAX_AGE_MS)
+      return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 /**

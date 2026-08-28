@@ -3,6 +3,7 @@
 import { errorResponse, jsonResponse } from "../../utils/http.js";
 import { listWavelengthInstanceTypes, toHttpError } from "../../utils/wavelength.js";
 import { validateInput } from "../../utils/validate.js";
+import { resolveAwsAccount } from "../../utils/aws-account.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
@@ -20,10 +21,11 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
+    const { awsEnv } = await resolveAwsAccount(env, query.account_id);
     return jsonResponse({
       region,
       zone,
-      instance_types: await listWavelengthInstanceTypes(env, region, zone),
+      instance_types: await listWavelengthInstanceTypes(awsEnv, region, zone),
     });
   } catch (error) {
     const httpError = toHttpError(error);

@@ -14,7 +14,7 @@ function makeResult(rows, meta = {}) {
 }
 
 // 具 AUTOINCREMENT 主鍵的表：INSERT 未提供 id 時自動補號
-const AUTO_ID_TABLES = new Set(["machines", "operation_log"]);
+const AUTO_ID_TABLES = new Set(["machines", "operation_log", "aws_accounts", "users"]);
 
 export class D1Stub {
   constructor() {
@@ -93,6 +93,10 @@ export class D1Stub {
     if (/^DELETE FROM (\w+)/i.test(sql)) {
       const table = sql.match(/^DELETE FROM (\w+)/i)[1];
       return { rows: [], result: this._delete(table, sql, bound) };
+    }
+    if (/^UPDATE (\w+)/i.test(sql)) {
+      const table = sql.match(/^UPDATE (\w+)/i)[1];
+      return { rows: [], result: this._update(table, sql, bound) };
     }
     throw new Error(`D1Stub 不支援的語句: ${sql}`);
   }
@@ -211,11 +215,35 @@ export class D1Stub {
     // 一般 INSERT：machines 表檢查 UNIQUE(region, instance_id) 語意
     if (table === "machines") {
       const duplicate = rows.some(
-        (r) => r.region === row.region && r.instance_id === row.instance_id,
+        (r) => r.aws_account_id === row.aws_account_id && r.region === row.region && r.instance_id === row.instance_id,
       );
       if (duplicate) {
         throw new Error("UNIQUE constraint failed: machines.region, machines.instance_id");
       }
+    }
+    if (table === "aws_accounts" && rows.some(r => r.name === row.name)) {
+      throw new Error("UNIQUE constraint failed: aws_accounts.name");
+    }
+    if (table === "users" && rows.some(r => r.username === row.username)) {
+      throw new Error("UNIQUE constraint failed: users.username");
+    }
+    if (table === "aws_accounts") {
+      Object.assign(row, {
+        enabled: row.enabled ?? 1,
+        is_default: row.is_default ?? 0,
+        last_verified_at: row.last_verified_at ?? null,
+        created_at: row.created_at ?? new Date().toISOString(),
+        updated_at: row.updated_at ?? new Date().toISOString(),
+      });
+    }
+    if (table === "users") {
+      Object.assign(row, {
+        role: row.role ?? "admin",
+        enabled: row.enabled ?? 1,
+        auth_version: row.auth_version ?? 1,
+        created_at: row.created_at ?? new Date().toISOString(),
+        updated_at: row.updated_at ?? new Date().toISOString(),
+      });
     }
     if (AUTO_ID_TABLES.has(table) && row.id === undefined) {
       this.lastRowId += 1;
@@ -241,12 +269,66 @@ export class D1Stub {
     this.tables.set(table, remaining);
     return makeResult([], { changes: rows.length - remaining.length });
   }
+
+  _update(table, sql, bound) {
+    const rows = this.tables.get(table) || [];
+    const setMatch = sql.match(/ SET (.+?)(?: WHERE (.+))?$/i);
+    if (!setMatch) {
+      throw new Error(`D1Stub 無法解析 UPDATE: ${sql}`);
+    }
+    const [, assignmentsText, whereText] = setMatch;
+    const matchesWhere = (row) => {
+      if (!whereText)
+        return true;
+      return whereText.split(/ AND /i).every((condition) => {
+        const nullMatch = condition.match(/(\w+) IS NULL/i);
+        if (nullMatch)
+          return row[nullMatch[1]] === null || row[nullMatch[1]] === undefined;
+        const equalMatch = condition.match(/(\w+)\s*=\s*(\?\d*|-?\d+|'[^']*')/);
+        if (!equalMatch)
+          throw new Error(`D1Stub 無法解析 UPDATE 條件: ${condition}`);
+        return row[equalMatch[1]] === this._resolveValue(equalMatch[2], bound, { index: 0 });
+      });
+    };
+    let changes = 0;
+    for (const row of rows) {
+      if (!matchesWhere(row))
+        continue;
+      const updated = { ...row };
+      for (const assignment of assignmentsText.split(/,\s*/)) {
+        const equalIndex = assignment.indexOf("=");
+        if (equalIndex < 1)
+          throw new Error(`D1Stub 無法解析 UPDATE 指派: ${assignment}`);
+        const column = assignment.slice(0, equalIndex).trim();
+        const expression = assignment.slice(equalIndex + 1).trim();
+        const increment = expression.match(/^(\w+) \+ (\?\d*)$/);
+        if (increment) {
+          updated[column] = Number(updated[increment[1]]) + Number(this._resolveValue(increment[2], bound, { index: 0 }));
+        }
+        else if (/^datetime\('now'\)$/i.test(expression)) {
+          updated[column] = new Date().toISOString();
+        }
+        else {
+          updated[column] = this._resolveValue(expression, bound, { index: 0 });
+        }
+      }
+      if (table === "aws_accounts" && rows.some(candidate => candidate !== row && candidate.name === updated.name)) {
+        throw new Error("UNIQUE constraint failed: aws_accounts.name");
+      }
+      if (table === "users" && rows.some(candidate => candidate !== row && candidate.username === updated.username)) {
+        throw new Error("UNIQUE constraint failed: users.username");
+      }
+      Object.assign(row, updated);
+      changes += 1;
+    }
+    return makeResult([], { changes });
+  }
 }
 
 /** 建立已套用 0001_init schema（空表）的樁。 */
 export function createDb() {
   const stub = new D1Stub();
-  for (const name of ["machines", "operation_log", "login_rate_limit"]) {
+  for (const name of ["machines", "operation_log", "login_rate_limit", "aws_accounts", "users"]) {
     stub.createTable(name);
   }
   return stub;

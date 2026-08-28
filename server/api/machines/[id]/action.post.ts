@@ -4,6 +4,7 @@
 import { appendOperationLog, getMachineById } from "../../../utils/db.js";
 import { errorResponse, jsonResponse, readJsonBody } from "../../../utils/http.js";
 import { performPowerAction } from "../../../utils/power.js";
+import { resolveAwsAccount } from "../../../utils/aws-account.js";
 
 // 請求大小上限：本端點僅接受 { action } 一個欄位
 const MAX_BODY_BYTES = 10240;
@@ -32,7 +33,8 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
-    await performPowerAction(env, machine, action);
+    const { awsEnv } = await resolveAwsAccount(env, machine.awsAccountId);
+    await performPowerAction(awsEnv, machine, action);
   } catch (error) {
     try {
       await appendOperationLog(env.DB, {
@@ -41,6 +43,7 @@ export default defineEventHandler(async (event) => {
         instanceId: machine.instanceId,
         status: "failure",
         detail: error instanceof Error ? error.message : String(error),
+        awsAccountId: machine.awsAccountId,
       });
     } catch {
       // 日誌寫入失敗不影響錯誤回應
@@ -55,6 +58,7 @@ export default defineEventHandler(async (event) => {
       instanceId: machine.instanceId,
       status: "success",
       detail: null,
+      awsAccountId: machine.awsAccountId,
     });
   } catch {
     // 日誌寫入失敗不影響成功回應

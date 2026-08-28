@@ -92,11 +92,15 @@ export async function ec2Query(region, env, action, params = {}) {
   const body = bodyParams.toString();
   const bodyHash = await sha256Hex(body);
   const host = `ec2.${region}.amazonaws.com`;
+  const sessionToken = env.AWS_SESSION_TOKEN || "";
   const canonicalHeaders =
     `content-type:application/x-www-form-urlencoded; charset=utf-8\n` +
     `host:${host}\n` +
-    `x-amz-date:${amzDate}\n`;
-  const signedHeaders = "content-type;host;x-amz-date";
+    `x-amz-date:${amzDate}\n${
+      sessionToken ? `x-amz-security-token:${sessionToken}\n` : ""}`;
+  const signedHeaders = sessionToken
+    ? "content-type;host;x-amz-date;x-amz-security-token"
+    : "content-type;host;x-amz-date";
   const canonicalRequest = [
     method,
     "/",
@@ -126,13 +130,16 @@ export async function ec2Query(region, env, action, params = {}) {
   const fetchImpl = env.__testHooks?.fetch || fetch;
   // AWS API 偶發無回應時，fetch 可能無限期掛住並拖垮整個請求；
   // 以 30 秒逾時確保上層輪詢與 SSE 進度串流能持續推進。
+  const headers = {
+    "content-type": "application/x-www-form-urlencoded; charset=utf-8",
+    "x-amz-date": amzDate,
+    authorization,
+  };
+  if (sessionToken)
+    headers["x-amz-security-token"] = sessionToken;
   const response = await fetchImpl(endpoint, {
     method,
-    headers: {
-      "content-type": "application/x-www-form-urlencoded; charset=utf-8",
-      "x-amz-date": amzDate,
-      authorization,
-    },
+    headers,
     body,
     signal: AbortSignal.timeout(AWS_QUERY_TIMEOUT_MS),
   });

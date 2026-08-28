@@ -16,12 +16,17 @@ interface MachineRow {
   state: string | null
   publicIpAddress: string | null
   publicDnsName: string | null
+  awsAccountId: number | null
+  awsAccountName: string | null
 }
+
+interface AwsAccountOption { id: number, name: string, enabled: boolean, isDefault: boolean }
 
 const machines = ref<MachineRow[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
 const actionPendingId = ref<number | null>(null)
+const accounts = ref<AwsAccountOption[]>([])
 
 // 統計卡片資料
 const stats = computed(() => {
@@ -68,6 +73,7 @@ async function performAction(machine: MachineRow, action: 'start' | 'stop') {
       headers: { 'Content-Type': 'application/json' },
     })
     toast.success(`${machine.name} 已送出${action === 'start' ? '啟動' : '關閉'}請求`)
+    await new Promise(resolve => setTimeout(resolve, 2000))
     await loadMachines()
   }
   catch (error: any) {
@@ -78,9 +84,26 @@ async function performAction(machine: MachineRow, action: 'start' | 'stop') {
   }
 }
 
+const stopTarget = ref<MachineRow | null>(null)
+
+function requestPowerAction(machine: MachineRow, action: 'start' | 'stop') {
+  if (action === 'stop') {
+    stopTarget.value = machine
+    return
+  }
+  return performAction(machine, action)
+}
+
+async function confirmStop() {
+  const machine = stopTarget.value
+  stopTarget.value = null
+  if (machine)
+    await performAction(machine, 'stop')
+}
+
 // 新增機器對話框
 const showAddDialog = ref(false)
-const addForm = ref({ region: '', instanceId: '', name: '', isWavelength: false })
+const addForm = ref<{ awsAccountId: number | null, region: string, instanceId: string, name: string, isWavelength: boolean }>({ awsAccountId: null, region: '', instanceId: '', name: '', isWavelength: false })
 const adding = ref(false)
 
 async function submitAdd() {
@@ -95,7 +118,7 @@ async function submitAdd() {
     })
     toast.success('機器已新增')
     showAddDialog.value = false
-    addForm.value = { region: '', instanceId: '', name: '', isWavelength: false }
+    addForm.value = { awsAccountId: accounts.value.find(account => account.isDefault)?.id || null, region: '', instanceId: '', name: '', isWavelength: false }
     await loadMachines()
   }
   catch (error: any) {
@@ -156,7 +179,17 @@ async function copyText(text: string) {
   toast.success('已複製到剪貼簿')
 }
 
-onMounted(loadMachines)
+onMounted(async () => {
+  try {
+    const payload = await $fetch<{ accounts: AwsAccountOption[] }>('/api/accounts')
+    accounts.value = payload.accounts.filter(account => account.enabled)
+    addForm.value.awsAccountId = accounts.value.find(account => account.isDefault)?.id || accounts.value[0]?.id || null
+  }
+  catch {
+    toast.error('載入 AWS 帳號失敗')
+  }
+  await loadMachines()
+})
 </script>
 
 <template>
@@ -236,6 +269,7 @@ onMounted(loadMachines)
             <TableRow>
               <TableHead>名稱</TableHead>
               <TableHead>地區</TableHead>
+              <TableHead>AWS 帳號</TableHead>
               <TableHead>狀態</TableHead>
               <TableHead>公網 IP</TableHead>
               <TableHead>DNS</TableHead>
@@ -259,6 +293,9 @@ onMounted(loadMachines)
               </TableCell>
               <TableCell class="font-mono text-xs">
                 {{ machine.region }}
+              </TableCell>
+              <TableCell class="text-xs">
+                {{ machine.awsAccountName || '未關聯' }}
               </TableCell>
               <TableCell>
                 <Badge :variant="stateBadgeVariant(machine.state)">
@@ -290,11 +327,20 @@ onMounted(loadMachines)
               <TableCell class="text-right">
                 <div class="flex items-center justify-end gap-1">
                   <Button
+                    variant="ghost"
+                    size="icon"
+                    title="重新整理狀態"
+                    :disabled="refreshing || actionPendingId !== null"
+                    @click="refresh"
+                  >
+                    <RefreshCw class="h-4 w-4" />
+                  </Button>
+                  <Button
                     v-if="machine.state !== 'running'"
                     variant="outline"
                     size="sm"
                     :disabled="actionPendingId === machine.id"
-                    @click="performAction(machine, 'start')"
+                    @click="requestPowerAction(machine, 'start')"
                   >
                     啟動
                   </Button>
@@ -303,7 +349,7 @@ onMounted(loadMachines)
                     variant="outline"
                     size="sm"
                     :disabled="actionPendingId === machine.id"
-                    @click="performAction(machine, 'stop')"
+                    @click="requestPowerAction(machine, 'stop')"
                   >
                     關閉
                   </Button>
@@ -333,6 +379,17 @@ onMounted(loadMachines)
           </DialogDescription>
         </DialogHeader>
         <div class="grid gap-4 py-2">
+          <div class="grid gap-2">
+            <Label for="add-account">AWS 帳號</Label>
+            <select id="add-account" v-model.number="addForm.awsAccountId" class="h-9 rounded-md border bg-background px-3 text-sm">
+              <option :value="null" disabled>
+                請選擇 AWS 帳號
+              </option>
+              <option v-for="account in accounts" :key="account.id" :value="account.id">
+                {{ account.name }}{{ account.isDefault ? '（預設）' : '' }}
+              </option>
+            </select>
+          </div>
           <div class="grid gap-2">
             <Label for="add-region">地區</Label>
             <Input
@@ -370,13 +427,32 @@ onMounted(loadMachines)
           <Button variant="outline" :disabled="adding" @click="showAddDialog = false">
             取消
           </Button>
-          <Button :disabled="adding || !addForm.region || !addForm.instanceId || !addForm.name" @click="submitAdd">
+          <Button :disabled="adding || !addForm.awsAccountId || !addForm.region || !addForm.instanceId || !addForm.name" @click="submitAdd">
             <Loader2 v-if="adding" class="mr-2 h-4 w-4 animate-spin" />
             新增
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <AlertDialog :open="stopTarget !== null" @update:open="stopTarget = $event ? stopTarget : null">
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>確認關閉機器</AlertDialogTitle>
+          <AlertDialogDescription>
+            確定要關閉「{{ stopTarget?.name }}」嗎？此操作將停止 AWS 上的 EC2 執行個體。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel @click="stopTarget = null">
+            取消
+          </AlertDialogCancel>
+          <AlertDialogAction @click="confirmStop">
+            關閉
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
 
     <AlertDialog :open="removeTarget !== null" @update:open="removeTarget = $event ? removeTarget : null">
       <AlertDialogContent>

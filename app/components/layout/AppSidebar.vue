@@ -9,15 +9,12 @@ function resolveNavItemComponent(item: NavLink | NavGroup | NavSectionTitle): an
   return resolveComponent('LayoutSidebarNavLink')
 }
 
-const user: {
-  name: string
-  email: string
-  avatar: string
-} = {
-  name: '管理者',
-  email: 'admin@aws-console',
+const { data: session } = useFetch<{ authenticated: boolean, user: { username: string, role: string } | null }>('/api/session')
+const user = computed(() => ({
+  name: session.value?.user?.username || '管理者',
+  email: session.value?.user?.role === 'admin' ? '管理者' : session.value?.user?.role || '',
   avatar: '/avatars/avatartion.png',
-}
+}))
 </script>
 
 <template>

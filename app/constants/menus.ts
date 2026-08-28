@@ -19,6 +19,11 @@ export const navMenu: NavMenu[] = [
         icon: 'i-lucide-scroll-text',
         link: '/logs',
       },
+      {
+        title: '帳號管理',
+        icon: 'i-lucide-key-round',
+        link: '/accounts',
+      },
     ],
   },
 ]

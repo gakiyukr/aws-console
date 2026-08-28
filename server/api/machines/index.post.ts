@@ -1,6 +1,6 @@
 // POST /api/machines：新增機器至 D1 清單。
 // 全欄位正則驗證；(region, instanceId) 重複時回 409。
-import { createMachine } from "../../utils/db.js";
+import { createMachine, getAwsAccountById } from "../../utils/db.js";
 import { errorResponse, jsonResponse, readJsonBody } from "../../utils/http.js";
 import { validateInput } from "../../utils/validate.js";
 
@@ -23,8 +23,13 @@ export default defineEventHandler(async (event) => {
   if (!name.valid) {
     return errorResponse(400, name.error);
   }
+  const awsAccountId = Number(body.awsAccountId);
+  if (!Number.isSafeInteger(awsAccountId) || awsAccountId <= 0 || !await getAwsAccountById(env.DB, awsAccountId)) {
+    return errorResponse(400, "請選擇有效的 AWS 帳號");
+  }
 
   const created = await createMachine(env.DB, {
+    awsAccountId,
     region: body.region,
     instanceId: body.instanceId,
     name: body.name,

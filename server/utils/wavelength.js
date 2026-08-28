@@ -1894,10 +1894,17 @@ export function toHttpError(error) {
     };
   }
 
+  if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 600) {
+    return {
+      status: error.statusCode,
+      body: { error: error.message || "請求失敗" },
+    };
+  }
+
   return {
     status: 500,
     body: {
-      error: "Internal Server Error",
+      error: "伺服器內部錯誤",
     },
   };
 }

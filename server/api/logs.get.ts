@@ -27,6 +27,7 @@ export default defineEventHandler(async (event) => {
   const query = getQuery(event);
   const action = typeof query.action === "string" ? query.action : undefined;
   const status = typeof query.status === "string" ? query.status : undefined;
+  const awsAccountId = query.account_id === undefined ? undefined : Number(query.account_id);
 
   if (query.action !== undefined && action === undefined) {
     return errorResponse(400, "action 參數無效");
@@ -44,12 +45,15 @@ export default defineEventHandler(async (event) => {
   if (status !== undefined && !LOG_STATUSES.has(status)) {
     return errorResponse(400, "status 參數無效");
   }
+  if (awsAccountId !== undefined && (!Number.isSafeInteger(awsAccountId) || awsAccountId <= 0)) {
+    return errorResponse(400, "account_id 參數無效");
+  }
 
   const limit = parseLimit(query.limit);
   if (limit === null) {
     return errorResponse(400, "limit 參數無效");
   }
 
-  const logs = await listOperationLogs(env.DB, { action, status, limit });
+  const logs = await listOperationLogs(env.DB, { action, status, awsAccountId, limit });
   return jsonResponse({ logs });
 });

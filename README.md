@@ -7,6 +7,7 @@
 - 部署 Wavelength 執行個體、一般區域 EC2 與 SSH forwarder。
 - 在部署成功後自動將建立的執行個體登錄至電源管理清單。
 - 保存登入限流、電源操作與部署結果的稽核日誌。
+- 在 D1 管理多組 AWS 帳號與主控台使用者；AWS Secret 以 AES-256-GCM 加密後儲存。
 
 ## 本機驗證
 
@@ -35,14 +36,32 @@ pnpm build
 pnpm exec wrangler --config .output/server/wrangler.json d1 migrations apply DB --remote
 ```
 
-正式環境的敏感設定必須使用 Cloudflare secrets，不應寫入 `.env` 或版本庫：
+正式環境只需保留以下 Cloudflare secrets，不應寫入 D1、`.env` 或版本庫：
 
 ```bash
 pnpm exec wrangler --config .output/server/wrangler.json secret put APP_PASSWORD
 pnpm exec wrangler --config .output/server/wrangler.json secret put SESSION_SECRET
-pnpm exec wrangler --config .output/server/wrangler.json secret put AWS_ACCESS_KEY_ID
-pnpm exec wrangler --config .output/server/wrangler.json secret put AWS_SECRET_ACCESS_KEY
+pnpm exec wrangler --config .output/server/wrangler.json secret put CREDENTIAL_ENCRYPTION_KEY
 ```
+
+- `APP_PASSWORD`：僅在 D1 尚無使用者時，用於首次登入並建立 `admin`。建立完成後可移除。
+- `SESSION_SECRET`：簽署登入 session，輪替後所有既有 session 失效。
+- `CREDENTIAL_ENCRYPTION_KEY`：32 位元組 Base64 AES 主金鑰。遺失或更換後，既有 AWS 憑證無法解密。
+
+可在本機產生兩個獨立的隨機 Base64 secret：
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
+```
+
+首次登入後前往「帳號管理」新增 AWS Access Key。Access Key、Secret Access Key
+與選填 Session Token 會在 Worker 內加密後寫入 D1；API 與頁面只會顯示 Access Key
+尾四位。請勿將 `CREDENTIAL_ENCRYPTION_KEY` 放入 D1，否則密文失去隔離意義。
+
+`0002_seed_legacy_machine.sql` 會以 `INSERT OR IGNORE` 將舊版
+`ec2-power-console` 的 `SEA-1` 管理目標移入 D1；既有資料不會被覆寫或重複建立。
+`0003_accounts_and_users.sql` 會建立 AWS 帳號與主控台使用者資料表，並為機器及
+操作日誌加入 AWS 帳號關聯。建立第一個 AWS 帳號時，尚未關聯的舊機器會自動歸入該帳號。
 
 完成 D1 與 secrets 設定後執行：
 
@@ -56,7 +75,9 @@ pnpm deploy
 
 - `/api/machines`：EC2 管理清單與即時狀態。
 - `/api/machines/:id/action`：白名單機器的開機或關機。
+- `/api/accounts`：AWS 帳號與加密憑證管理；`/:id/test` 可驗證憑證。
+- `/api/users`：D1 主控台使用者管理與密碼替換。
 - `/api/wavelength/*`：Wavelength 探索、初始化與部署流程。
-- `/api/logs`：可依 `action`、`status`、`limit` 讀取稽核日誌。
+- `/api/logs`：可依 `account_id`、`action`、`status`、`limit` 讀取稽核日誌。
 
 所有 `/api` 端點（登入、CSRF 與 session 查詢除外）都要求有效登入 session。

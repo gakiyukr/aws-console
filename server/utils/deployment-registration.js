@@ -42,7 +42,7 @@ export function collectDeploymentMachines(deploymentType, result) {
  * 登錄部署產生的執行個體。資料庫同步失敗不能掩蓋 AWS 已成功建立資源的結果，
  * 因此逐筆回報登錄狀態，並交由呼叫端在 SSE 結果中揭露。
  */
-export async function registerDeploymentMachines(db, deploymentType, region, result) {
+export async function registerDeploymentMachines(db, deploymentType, region, result, awsAccountId = null) {
   const candidates = collectDeploymentMachines(deploymentType, result);
 
   if (!db) {
@@ -55,6 +55,7 @@ export async function registerDeploymentMachines(db, deploymentType, region, res
   return Promise.all(candidates.map(async (candidate) => {
     try {
       const created = await createMachine(db, {
+        awsAccountId,
         region,
         instanceId: candidate.instanceId,
         // 留空可在首次狀態同步時採用 AWS 的 Name 標籤。

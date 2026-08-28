@@ -80,7 +80,7 @@ export default defineNuxtConfig({
   nitro: {
     preset: 'cloudflare_module',
     cloudflare: {
-      // 產物由 Wrangler 部署；keep_vars 保留 Dashboard 中以 secret 設定的 AWS 憑證與登入密碼。
+      // 產物由 Wrangler 部署；keep_vars 保留 Dashboard 中的 session 與憑證加密 secrets。
       deployConfig: true,
       nodeCompat: true,
       wrangler: {

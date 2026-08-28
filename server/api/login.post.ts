@@ -8,7 +8,9 @@ import {
   createSessionValue,
   getCsrfTokenFromRequest,
 } from "../utils/auth.js";
+import { createUser, getUserByUsername, listUsers } from "../utils/db.js";
 import { getClientIp, jsonResponse, readJsonBody } from "../utils/http.js";
+import { hashPassword, verifyPassword } from "../utils/password.js";
 import {
   isLoginBlocked,
   registerLoginFailure,
@@ -20,11 +22,11 @@ const CSRF_HEADER = "x-csrf-token";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
-  const password = env?.APP_PASSWORD;
+  const bootstrapPassword = env?.APP_PASSWORD;
   const secret = env?.SESSION_SECRET;
   const db = env?.DB;
 
-  if (!password || !secret || !db) {
+  if (!secret || !db) {
     throw createError({
       statusCode: 503,
       message: "伺服器尚未完成認證設定",
@@ -43,6 +45,7 @@ export default defineEventHandler(async (event) => {
   }
 
   const body = await readJsonBody(event);
+  const username = typeof body?.username === "string" ? body.username.trim() : "admin";
   const submittedPassword = typeof body?.password === "string" ? body.password : "";
   const clientIp = getClientIp(event.node.req.headers);
 
@@ -56,22 +59,39 @@ export default defineEventHandler(async (event) => {
     });
   }
 
-  // ── 密碼比較：常數時間，避免時序側通道 ──
-  const passwordOk = submittedPassword
-    && (await constantTimeCompare(submittedPassword, password));
+  let user = await getUserByUsername(db, username);
+  const users = user ? null : await listUsers(db);
+
+  // 尚無使用者時，以 APP_PASSWORD 完成一次性管理者引導並立即寫入 D1。
+  if (!user && users?.length === 0 && bootstrapPassword && username === "admin") {
+    const bootstrapOk = submittedPassword
+      && await constantTimeCompare(submittedPassword, bootstrapPassword);
+    if (bootstrapOk) {
+      user = await createUser(db, {
+        username: "admin",
+        ...await hashPassword(submittedPassword),
+        role: "admin",
+        enabled: true,
+      });
+    }
+  }
+
+  const passwordOk = Boolean(
+    user?.enabled && submittedPassword && await verifyPassword(submittedPassword, user),
+  );
 
   if (!passwordOk) {
     await registerLoginFailure(db, clientIp);
     throw createError({
       statusCode: 401,
-      message: "密碼錯誤",
-      data: { error: "密碼錯誤" },
+      message: "帳號或密碼錯誤",
+      data: { error: "帳號或密碼錯誤" },
     });
   }
 
   // ── 登入成功：簽發 session、清除失敗計數、清除 CSRF cookie 使其單次有效 ──
   await resetLoginFailures(db, clientIp);
-  const sessionValue = await createSessionValue(password, secret);
+  const sessionValue = await createSessionValue({ userId: user.id, authVersion: user.authVersion }, secret);
   setHeader(event, "Set-Cookie", [buildSessionCookie(sessionValue), buildClearedCsrfCookie()]);
-  return jsonResponse({ ok: true });
+  return jsonResponse({ ok: true, user: { id: user.id, username: user.username, role: user.role } });
 });

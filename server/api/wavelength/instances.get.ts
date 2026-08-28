@@ -3,6 +3,7 @@
 import { errorResponse, jsonResponse } from "../../utils/http.js";
 import { listExistingWavelengthInstances, toHttpError } from "../../utils/wavelength.js";
 import { validateInput } from "../../utils/validate.js";
+import { resolveAwsAccount } from "../../utils/aws-account.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
@@ -25,13 +26,14 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
+    const { awsEnv } = await resolveAwsAccount(env, query.account_id);
     // 測試注入點：與舊版 worker 相同，允許以樁替換清單函式
     const listFn = env.__testHooks?.listExistingWavelengthInstances || listExistingWavelengthInstances;
     return jsonResponse({
       region,
       zone,
       vpc_id: vpcId,
-      instances: await listFn(env, { region, zone, vpc_id: vpcId }),
+      instances: await listFn(awsEnv, { region, zone, vpc_id: vpcId }),
     });
   } catch (error) {
     const httpError = toHttpError(error);

@@ -4,9 +4,34 @@
 import { listMachines } from "../../utils/db.js";
 import { jsonResponse } from "../../utils/http.js";
 import { mergeMachineStates } from "../../utils/power.js";
+import { resolveAwsAccount } from "../../utils/aws-account.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
   const machines = await listMachines(env.DB);
-  return jsonResponse(await mergeMachineStates(env, machines));
+  const groups = new Map<number | null, typeof machines>();
+  for (const machine of machines) {
+    const key = machine.awsAccountId || null;
+    groups.set(key, [...(groups.get(key) || []), machine]);
+  }
+  const rows = new Map<number, any>();
+  await Promise.all([...groups.entries()].map(async ([accountId, accountMachines]) => {
+    try {
+      const { account, awsEnv } = await resolveAwsAccount(env, accountId);
+      for (const machine of await mergeMachineStates(awsEnv, accountMachines)) {
+        rows.set(machine.id, { ...machine, awsAccountName: account.name });
+      }
+    } catch {
+      for (const machine of accountMachines) {
+        rows.set(machine.id, {
+          ...machine,
+          awsAccountName: null,
+          state: "查詢失敗",
+          publicDnsName: "查詢失敗",
+          publicIpAddress: "查詢失敗",
+        });
+      }
+    }
+  }));
+  return jsonResponse(machines.map(machine => rows.get(machine.id)));
 });

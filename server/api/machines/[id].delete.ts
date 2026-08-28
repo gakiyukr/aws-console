@@ -23,6 +23,7 @@ export default defineEventHandler(async (event) => {
       instanceId: machine.instanceId,
       status: "success",
       detail: `已移除機器「${machine.name}」`,
+      awsAccountId: machine.awsAccountId,
     });
   } catch {
     // 日誌寫入失敗不影響移除結果
