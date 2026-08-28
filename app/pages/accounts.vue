@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckCircle2, KeyRound, Loader2, Pencil, Plus, ShieldCheck, Trash2, Users } from 'lucide-vue-next'
+import { CheckCircle2, KeyRound, Loader2, Pencil, Plus, Trash2 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 
 useSeoMeta({ title: '帳號管理 - AWS 主控台' })
@@ -13,34 +13,19 @@ interface AwsAccount {
   lastVerifiedAt: string | null
 }
 
-interface ConsoleUser {
-  id: number
-  username: string
-  role: string
-  enabled: boolean
-}
-
 const accounts = ref<AwsAccount[]>([])
-const users = ref<ConsoleUser[]>([])
 const loading = ref(true)
 const saving = ref(false)
 const testingId = ref<number | null>(null)
 const accountDialog = ref(false)
-const userDialog = ref(false)
 const editingAccountId = ref<number | null>(null)
-const editingUserId = ref<number | null>(null)
 const accountForm = reactive({ name: '', accessKeyId: '', secretAccessKey: '', sessionToken: '', enabled: true, isDefault: false })
-const userForm = reactive({ username: '', password: '', enabled: true })
 
 async function loadData() {
   loading.value = true
   try {
-    const [accountPayload, userPayload] = await Promise.all([
-      $fetch<{ accounts: AwsAccount[] }>('/api/accounts'),
-      $fetch<{ users: ConsoleUser[] }>('/api/users'),
-    ])
+    const accountPayload = await $fetch<{ accounts: AwsAccount[] }>('/api/accounts')
     accounts.value = accountPayload.accounts
-    users.value = userPayload.users
   }
   catch (error: any) {
     toast.error(error?.data?.error || '載入帳號資料失敗')
@@ -115,40 +100,6 @@ async function removeAccount(account: AwsAccount) {
   }
 }
 
-function openNewUser() {
-  editingUserId.value = null
-  Object.assign(userForm, { username: '', password: '', enabled: true })
-  userDialog.value = true
-}
-
-function openEditUser(user: ConsoleUser) {
-  editingUserId.value = user.id
-  Object.assign(userForm, { username: user.username, password: '', enabled: user.enabled })
-  userDialog.value = true
-}
-
-async function saveUser() {
-  saving.value = true
-  try {
-    const body: Record<string, unknown> = { username: userForm.username, enabled: userForm.enabled }
-    if (userForm.password)
-      body.password = userForm.password
-    await $fetch(editingUserId.value ? `/api/users/${editingUserId.value}` : '/api/users', {
-      method: editingUserId.value ? 'PUT' : 'POST',
-      body,
-    })
-    toast.success(editingUserId.value ? '使用者已更新' : '使用者已建立')
-    userDialog.value = false
-    await loadData()
-  }
-  catch (error: any) {
-    toast.error(error?.data?.error || '儲存使用者失敗')
-  }
-  finally {
-    saving.value = false
-  }
-}
-
 onMounted(loadData)
 </script>
 
@@ -159,7 +110,7 @@ onMounted(loadData)
         帳號管理
       </h2>
       <p class="text-sm text-muted-foreground">
-        管理 D1 中的 AWS 加密憑證與主控台使用者
+        管理 D1 中的 AWS 加密憑證
       </p>
     </div>
 
@@ -215,39 +166,6 @@ onMounted(loadData)
       </div>
     </section>
 
-    <section class="space-y-4">
-      <div class="flex items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <Users class="h-5 w-5" /><h3 class="text-lg font-semibold">
-            主控台使用者
-          </h3>
-        </div>
-        <Button variant="outline" size="sm" @click="openNewUser">
-          <Plus class="mr-2 h-4 w-4" />新增使用者
-        </Button>
-      </div>
-      <div class="overflow-x-auto border-y">
-        <Table>
-          <TableHeader><TableRow><TableHead>使用者</TableHead><TableHead>角色</TableHead><TableHead>狀態</TableHead><TableHead class="w-16" /></TableRow></TableHeader>
-          <TableBody>
-            <TableRow v-for="user in users" :key="user.id">
-              <TableCell class="font-medium">
-                {{ user.username }}
-              </TableCell><TableCell><span class="flex items-center gap-1"><ShieldCheck class="h-4 w-4" />管理者</span></TableCell><TableCell>
-                <Badge :variant="user.enabled ? 'outline' : 'secondary'">
-                  {{ user.enabled ? '啟用' : '停用' }}
-                </Badge>
-              </TableCell><TableCell>
-                <Button variant="ghost" size="icon" title="編輯使用者" @click="openEditUser(user)">
-                  <Pencil class="h-4 w-4" />
-                </Button>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </div>
-    </section>
-
     <Dialog v-model:open="accountDialog">
       <DialogContent>
         <DialogHeader><DialogTitle>{{ editingAccountId ? '編輯 AWS 帳號' : '新增 AWS 帳號' }}</DialogTitle><DialogDescription>Secret 僅會加密寫入 D1，既有 Secret 不會讀回瀏覽器。</DialogDescription></DialogHeader>
@@ -268,26 +186,6 @@ onMounted(loadData)
           <Button variant="outline" @click="accountDialog = false">
             取消
           </Button><Button :disabled="saving || !accountForm.name || (!editingAccountId && (!accountForm.accessKeyId || !accountForm.secretAccessKey))" @click="saveAccount">
-            <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />儲存
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-
-    <Dialog v-model:open="userDialog">
-      <DialogContent>
-        <DialogHeader><DialogTitle>{{ editingUserId ? '編輯使用者' : '新增使用者' }}</DialogTitle><DialogDescription>變更密碼或停用使用者會撤銷該使用者的既有 session。</DialogDescription></DialogHeader>
-        <div class="grid gap-4">
-          <div class="grid gap-2">
-            <Label for="console-username">使用者名稱</Label><Input id="console-username" v-model="userForm.username" autocomplete="off" />
-          </div><div class="grid gap-2">
-            <Label for="console-password">{{ editingUserId ? '新密碼（選填）' : '密碼' }}</Label><PasswordInput id="console-password" v-model="userForm.password" autocomplete="new-password" />
-          </div><label class="flex items-center gap-2 text-sm"><Checkbox :model-value="userForm.enabled" @update:model-value="userForm.enabled = $event === true" />啟用</label>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" @click="userDialog = false">
-            取消
-          </Button><Button :disabled="saving || !userForm.username || (!editingUserId && !userForm.password)" @click="saveUser">
             <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />儲存
           </Button>
         </DialogFooter>

@@ -1,17 +1,21 @@
 // Nitro 伺服器中介層：/api/** 認證守衛。
-// 放行清單：登入流程所需端點（csrf/login）、session 查詢（供前端
-// 判斷導向）與 Nuxt 唯讀圖示端點。其餘 /api/** 一律要求有效
-// session，否則回 401 JSON。
+// 放行清單：SSO 登入流程（/api/auth/login、/api/auth/callback）與
+// session 查詢（供前端判斷導向）及 Nuxt 唯讀圖示端點。其餘 /api/**
+// 一律要求有效 session，且 session 內 email 必須在 OIDC 允許清單中，
+// 否則回 401 JSON。頁面路由交由前端中介層導向 /login。
 import { getSessionFromRequest, parseSessionValue } from "../utils/auth.js";
-import { getUserById } from "../utils/db.js";
+import { isAllowedEmail, isOidcConfigured } from "../utils/oidc.js";
 
 // 不需認證的 API 路徑（相對於 /api）
-const PUBLIC_API_PATHS = new Set(["/api/csrf", "/api/login", "/api/session"]);
+const PUBLIC_API_PATHS = new Set([
+  "/api/auth/login",
+  "/api/auth/callback",
+  "/api/session",
+]);
 
 export default defineEventHandler(async (event) => {
   const path = event.path.split("?")[0];
 
-  // 僅攔截 /api/**；頁面路由交由前端中介層導向 /login
   if (
     !path.startsWith("/api/")
     || PUBLIC_API_PATHS.has(path)
@@ -23,19 +27,17 @@ export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
   const secret = env?.SESSION_SECRET;
 
-  // 未設定 secrets 時直接拒絕，避免「空密碼可登入」的退化行為
-  if (!env?.DB || !secret) {
+  // 未設定 secrets 或 OIDC 時直接拒絕，fail closed
+  if (!secret || !isOidcConfigured(env)) {
     throw createError({
       statusCode: 503,
-      message: "伺服器尚未設定認證環境變數",
+      message: "伺服器尚未完成認證設定",
     });
   }
 
   const session = getSessionFromRequest(event.node.req);
   const payload = session ? await parseSessionValue(session, secret) : null;
-  const user = payload?.userId ? await getUserById(env.DB, Number(payload.userId)) : null;
-  const valid = Boolean(user?.enabled && user.authVersion === Number(payload?.authVersion));
-  if (!valid) {
+  if (!payload?.email || !isAllowedEmail(env, payload.email)) {
     // createError 中斷後續處理；data.error 維持統一錯誤格式
     throw createError({
       statusCode: 401,
@@ -43,9 +45,4 @@ export default defineEventHandler(async (event) => {
       data: { error: "未登入或 session 已失效" },
     });
   }
-  event.context.authUser = {
-    id: user.id,
-    username: user.username,
-    role: user.role,
-  };
 });

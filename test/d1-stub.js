@@ -1,8 +1,7 @@
 // 記憶體版 D1 樁：實作測試所需的最小 D1 介面（prepare/bind/first/all/run/batch），
 // 以極簡 SQL 直譯支援本專案用到的語句形態——SELECT/WHERE 等值條件（含 ?N 編號
 // 佔位符與 ? 依序佔位符）、AS 別名投影、ORDER BY 單欄排序、LIMIT、
-// INSERT ... VALUES、DELETE ... WHERE、以及 login_rate_limit 的
-// INSERT ... ON CONFLICT(ip) DO UPDATE SET col = CASE ... END。
+// INSERT ... VALUES、DELETE ... WHERE。
 // 不追求通用 SQL 支援；新增查詢若超出此範圍，需同步擴充此樁。
 
 /** 將 D1 result 物件塑形成 { results, meta }。 */
@@ -14,7 +13,7 @@ function makeResult(rows, meta = {}) {
 }
 
 // 具 AUTOINCREMENT 主鍵的表：INSERT 未提供 id 時自動補號
-const AUTO_ID_TABLES = new Set(["machines", "operation_log", "aws_accounts", "users"]);
+const AUTO_ID_TABLES = new Set(["machines", "operation_log", "aws_accounts"]);
 
 export class D1Stub {
   constructor() {
@@ -167,9 +166,7 @@ export class D1Stub {
   }
 
   /**
-   * 解析 INSERT INTO <table> (cols) VALUES (...) [ON CONFLICT(col) DO UPDATE SET ...]。
-   * ON CONFLICT 分支針對 login_rate_limit 的 CASE 運算式做語意模擬：
-   * 直接依 db.js 的視窗規則重算（視窗過期重置為 1，否則遞增並於達上限時封鎖）。
+   * 解析 INSERT INTO <table> (cols) VALUES (...)。
    */
   _insert(table, sql, bound) {
     this.createTable(table);
@@ -188,31 +185,7 @@ export class D1Stub {
 
     const rows = this.tables.get(table);
 
-    if (/ON CONFLICT/i.test(sql)) {
-      const existing = rows.find((r) => r.ip === row.ip);
-      if (existing) {
-        // 語意重算：與 db.js recordLoginFailure 的 CASE 邏輯一致。
-        // 綁定順序：?1=ip、?2=windowStart、?3=now、?4=失敗上限、?5=封鎖期限。
-        const windowStart = bound[1];
-        const now = bound[2];
-        const failureLimit = bound[3];
-        const blockedUntil = bound[4];
-        if (existing.window_start <= windowStart) {
-          existing.fail_count = 1;
-          existing.window_start = now;
-        } else {
-          existing.fail_count += 1;
-        }
-        existing.blocked_until =
-          existing.fail_count >= failureLimit ? blockedUntil : existing.blocked_until;
-        return makeResult([], { changes: 1 });
-      }
-      rows.push(row);
-      this.lastRowId += 1;
-      return makeResult([], { changes: 1, last_row_id: this.lastRowId });
-    }
-
-    // 一般 INSERT：machines 表檢查 UNIQUE(region, instance_id) 語意
+    // machines 表檢查 UNIQUE(region, instance_id) 語意
     if (table === "machines") {
       const duplicate = rows.some(
         (r) => r.aws_account_id === row.aws_account_id && r.region === row.region && r.instance_id === row.instance_id,
@@ -224,23 +197,11 @@ export class D1Stub {
     if (table === "aws_accounts" && rows.some(r => r.name === row.name)) {
       throw new Error("UNIQUE constraint failed: aws_accounts.name");
     }
-    if (table === "users" && rows.some(r => r.username === row.username)) {
-      throw new Error("UNIQUE constraint failed: users.username");
-    }
     if (table === "aws_accounts") {
       Object.assign(row, {
         enabled: row.enabled ?? 1,
         is_default: row.is_default ?? 0,
         last_verified_at: row.last_verified_at ?? null,
-        created_at: row.created_at ?? new Date().toISOString(),
-        updated_at: row.updated_at ?? new Date().toISOString(),
-      });
-    }
-    if (table === "users") {
-      Object.assign(row, {
-        role: row.role ?? "admin",
-        enabled: row.enabled ?? 1,
-        auth_version: row.auth_version ?? 1,
         created_at: row.created_at ?? new Date().toISOString(),
         updated_at: row.updated_at ?? new Date().toISOString(),
       });
@@ -315,9 +276,6 @@ export class D1Stub {
       if (table === "aws_accounts" && rows.some(candidate => candidate !== row && candidate.name === updated.name)) {
         throw new Error("UNIQUE constraint failed: aws_accounts.name");
       }
-      if (table === "users" && rows.some(candidate => candidate !== row && candidate.username === updated.username)) {
-        throw new Error("UNIQUE constraint failed: users.username");
-      }
       Object.assign(row, updated);
       changes += 1;
     }
@@ -325,10 +283,10 @@ export class D1Stub {
   }
 }
 
-/** 建立已套用 0001_init schema（空表）的樁。 */
+/** 建立已套用 0001_init schema（0004 起移除 users 與 login_rate_limit）的樁。 */
 export function createDb() {
   const stub = new D1Stub();
-  for (const name of ["machines", "operation_log", "login_rate_limit", "aws_accounts", "users"]) {
+  for (const name of ["machines", "operation_log", "aws_accounts"]) {
     stub.createTable(name);
   }
   return stub;

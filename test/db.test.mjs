@@ -1,24 +1,16 @@
-// db.js 的單元測試：以記憶體 D1 樁驗證機器 CRUD、操作日誌、
-// 登入限流的視窗重置與封鎖語意。
+// db.js 的單元測試：以記憶體 D1 樁驗證機器 CRUD、操作日誌。
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  LOGIN_FAILURE_LIMIT,
   appendOperationLog,
   createAwsAccount,
-  clearLoginFailures,
   createMachine,
-  createUser,
   deleteAwsAccount,
   deleteMachine,
-  getLoginBlockState,
   getMachineById,
-  getUserByUsername,
   listMachines,
   listOperationLogs,
-  recordLoginFailure,
-  updateUser,
 } from "../server/utils/db.js";
 import { createDb } from "./d1-stub.js";
 
@@ -139,95 +131,3 @@ describe("AWS 帳號與資料關聯", () => {
   });
 });
 
-describe("主控台使用者", () => {
-  it("使用者可建立、查詢並以 authVersion 撤銷 session", async () => {
-    const db = createDb();
-    const user = await createUser(db, {
-      username: "admin",
-      passwordHash: "hash",
-      passwordSalt: "salt",
-      passwordIterations: 1000,
-      role: "admin",
-      enabled: true,
-    });
-    assert.equal((await getUserByUsername(db, "admin")).id, user.id);
-    const updated = await updateUser(db, user.id, {
-      ...user,
-      passwordHash: "new-hash",
-      invalidateSessions: true,
-    });
-    assert.equal(updated.authVersion, 2);
-    assert.equal(updated.passwordHash, "new-hash");
-  });
-});
-
-describe("登入限流", () => {
-  const MINUTE = 60 * 1000;
-
-  it("無記錄時不封鎖", async () => {
-    const db = createDb();
-    const state = await getLoginBlockState(db, "1.2.3.4", 1_000_000);
-    assert.equal(state.blocked, false);
-  });
-
-  it("累計達上限後觸發封鎖", async () => {
-    const db = createDb();
-    const now = 1_700_000_000_000;
-    let last;
-    for (let i = 0; i < LOGIN_FAILURE_LIMIT; i++) {
-      last = await recordLoginFailure(db, "1.2.3.4", now + i * MINUTE);
-    }
-    assert.equal(last.blocked, true);
-    assert.equal(last.failCount, LOGIN_FAILURE_LIMIT);
-
-    const state = await getLoginBlockState(db, "1.2.3.4", now + 5 * MINUTE);
-    assert.equal(state.blocked, true);
-    assert.ok(state.retryAfterMs > 0);
-  });
-
-  it("視窗過期後計數重置為 1", async () => {
-    const db = createDb();
-    const now = 1_700_000_000_000;
-    for (let i = 0; i < LOGIN_FAILURE_LIMIT - 1; i++) {
-      await recordLoginFailure(db, "1.2.3.4", now + i * MINUTE);
-    }
-    // 超過 15 分鐘視窗的下一次失敗應重置
-    const result = await recordLoginFailure(db, "1.2.3.4", now + 20 * MINUTE);
-    assert.equal(result.failCount, 1);
-    assert.equal(result.blocked, false);
-  });
-
-  it("封鎖到期後 getLoginBlockState 回復未封鎖", async () => {
-    const db = createDb();
-    const now = 1_700_000_000_000;
-    for (let i = 0; i < LOGIN_FAILURE_LIMIT; i++) {
-      await recordLoginFailure(db, "1.2.3.4", now + i * MINUTE);
-    }
-    const after = now + 5 * MINUTE + 15 * MINUTE + 1;
-    const state = await getLoginBlockState(db, "1.2.3.4", after);
-    assert.equal(state.blocked, false);
-  });
-
-  it("登入成功後清除計數", async () => {
-    const db = createDb();
-    const now = 1_700_000_000_000;
-    await recordLoginFailure(db, "1.2.3.4", now);
-    await recordLoginFailure(db, "1.2.3.4", now + MINUTE);
-    await clearLoginFailures(db, "1.2.3.4");
-    const state = await getLoginBlockState(db, "1.2.3.4", now + 2 * MINUTE);
-    assert.equal(state.blocked, false);
-    // 重新計數從 0 開始
-    const result = await recordLoginFailure(db, "1.2.3.4", now + 3 * MINUTE);
-    assert.equal(result.failCount, 1);
-  });
-
-  it("不同 IP 互不影響", async () => {
-    const db = createDb();
-    const now = 1_700_000_000_000;
-    for (let i = 0; i < LOGIN_FAILURE_LIMIT; i++) {
-      await recordLoginFailure(db, "1.1.1.1", now + i);
-    }
-    const result = await recordLoginFailure(db, "2.2.2.2", now);
-    assert.equal(result.blocked, false);
-  });
-});

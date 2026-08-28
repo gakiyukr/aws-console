@@ -1,83 +1,49 @@
 <script setup lang="ts">
-import { Loader2 } from 'lucide-vue-next'
-import PasswordInput from '~/components/PasswordInput.vue'
+import { Loader2, LogIn } from 'lucide-vue-next'
 
-const password = ref('')
-const username = ref('admin')
-const isLoading = ref(false)
-const errorMessage = ref('')
+// SSO 登入：點擊後導向 /api/auth/login（302 至 IdP 授權端點）。
+// callback 完成後帶 session 回到主控台；失敗則回到本頁並帶 error 代碼。
+const isRedirecting = ref(false)
+const route = useRoute()
 
-// 送出前先取得 CSRF token（ec2_csrf cookie），再連同密碼送至 /api/login
-async function onSubmit(event: Event) {
-  event.preventDefault()
-  if (!username.value || !password.value || isLoading.value)
+const ERROR_MESSAGES: Record<string, string> = {
+  configuration: '伺服器尚未完成 SSO 設定，請聯絡管理者。',
+  idp_error: '登入流程被 IdP 中止，請再試一次。',
+  state_mismatch: '登入流程已逾時或狀態不符，請重新登入。',
+  email_not_allowed: '此帳號未獲授權使用本主控台。',
+  verification_failed: '登入驗證失敗，請再試一次。',
+}
+
+const errorMessage = computed(() => {
+  const code = typeof route.query.error === 'string' ? route.query.error : ''
+  return code ? (ERROR_MESSAGES[code] || '登入失敗，請再試一次。') : ''
+})
+
+function startLogin() {
+  if (isRedirecting.value)
     return
-
-  isLoading.value = true
-  errorMessage.value = ''
-
-  try {
-    const { csrfToken } = await $fetch<{ csrfToken: string }>('/api/csrf', { method: 'GET' })
-    await $fetch('/api/login', {
-      method: 'POST',
-      body: { username: username.value, password: password.value },
-      headers: { 'x-csrf-token': csrfToken },
-    })
-    await navigateTo('/')
-  }
-  catch (error: any) {
-    const status = error?.statusCode || error?.response?.status
-    if (status === 429)
-      errorMessage.value = '嘗試次數過多，請稍後再試。'
-    else if (status === 403)
-      errorMessage.value = '安全驗證失敗，請重新整理頁面後再試。'
-    else
-      errorMessage.value = '帳號或密碼錯誤，請再試一次。'
-  }
-  finally {
-    isLoading.value = false
-  }
+  isRedirecting.value = true
+  navigateTo('/api/auth/login', { external: true })
 }
 </script>
 
 <template>
-  <form class="grid gap-6" @submit="onSubmit">
+  <div class="grid gap-6">
     <div class="grid gap-2 text-center">
       <h1 class="text-2xl font-semibold tracking-tight">
         AWS 主控台
       </h1>
       <p class="text-balance text-sm text-muted-foreground">
-        請輸入管理密碼以繼續
+        透過 SSO 驗證身分以繼續
       </p>
-    </div>
-    <div class="grid gap-2">
-      <Label for="username">
-        使用者名稱
-      </Label>
-      <Input
-        id="username"
-        v-model="username"
-        :disabled="isLoading"
-        autocomplete="username"
-      />
-    </div>
-    <div class="grid gap-2">
-      <Label for="password">
-        管理密碼
-      </Label>
-      <PasswordInput
-        id="password"
-        v-model="password"
-        :disabled="isLoading"
-        auto-complete="current-password"
-      />
     </div>
     <p v-if="errorMessage" class="text-sm text-destructive">
       {{ errorMessage }}
     </p>
-    <Button type="submit" class="w-full" :disabled="isLoading || !username || !password">
-      <Loader2 v-if="isLoading" class="mr-2 h-4 w-4 animate-spin" />
-      登入
+    <Button class="w-full" :disabled="isRedirecting" @click="startLogin">
+      <Loader2 v-if="isRedirecting" class="mr-2 h-4 w-4 animate-spin" />
+      <LogIn v-else class="mr-2 h-4 w-4" />
+      使用 SSO 登入
     </Button>
-  </form>
+  </div>
 </template>

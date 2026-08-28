@@ -1,20 +1,18 @@
-// auth.js 的單元測試：session 簽驗、時效、密碼雜湊綁定、CSRF、
+// auth.js 的單元測試：session／簽章值的簽驗與時效、cookie 解析與建構、
 // 常數時間比較。Node 24 內建 Web Crypto（globalThis.crypto）。
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
   SESSION_MAX_AGE_MS,
-  buildClearedCsrfCookie,
   buildClearedSessionCookie,
-  buildCsrfCookie,
   buildSessionCookie,
   constantTimeCompare,
-  createSessionValue,
-  generateCsrfToken,
-  getCsrfTokenFromRequest,
+  createSignedValue,
+  getCookieFromRequest,
   getSessionFromRequest,
-  verifySessionValue,
+  parseSessionValue,
+  parseSignedValue,
 } from "../server/utils/auth.js";
 
 const HOUR = 60 * 60 * 1000;
@@ -29,69 +27,68 @@ function makeRequest(cookiePairs) {
 }
 
 describe("session 簽章與驗證", () => {
-  it("建立後可驗證通過", async () => {
+  it("建立後可驗證通過並還原 payload", async () => {
     const now = 1_700_000_000_000;
-    const value = await createSessionValue("pw123", "secret", now);
-    assert.ok(await verifySessionValue(value, "secret", "pw123", now + HOUR));
-  });
-
-  it("錯誤密碼的 session 無法通過驗證", async () => {
-    const now = 1_700_000_000_000;
-    const value = await createSessionValue("pw123", "secret", now);
-    assert.equal(await verifySessionValue(value, "secret", "other", now), false);
+    const value = await createSignedValue({ email: "me@example.com" }, "secret", now);
+    const payload = await parseSessionValue(value, "secret", now + HOUR);
+    assert.equal(payload.email, "me@example.com");
+    assert.equal(Number(payload.issuedAt), now);
   });
 
   it("錯誤 secret 的簽章無法通過驗證", async () => {
     const now = 1_700_000_000_000;
-    const value = await createSessionValue("pw123", "secret", now);
-    assert.equal(await verifySessionValue(value, "rotated", "pw123", now), false);
+    const value = await createSignedValue({ email: "me@example.com" }, "secret", now);
+    assert.equal(await parseSessionValue(value, "rotated", now), null);
   });
 
   it("超過 24 小時的 session 失效", async () => {
     const now = 1_700_000_000_000;
-    const value = await createSessionValue("pw123", "secret", now);
+    const value = await createSignedValue({ email: "me@example.com" }, "secret", now);
     assert.equal(
-      await verifySessionValue(value, "secret", "pw123", now + SESSION_MAX_AGE_MS + 1),
-      false,
+      await parseSessionValue(value, "secret", now + SESSION_MAX_AGE_MS + 1),
+      null,
     );
-    assert.equal(
-      await verifySessionValue(value, "secret", "pw123", now + SESSION_MAX_AGE_MS),
-      true,
+    assert.ok(
+      await parseSessionValue(value, "secret", now + SESSION_MAX_AGE_MS),
     );
-  });
-
-  it("更換密碼後既有 session 立即失效（passwordHash 綁定）", async () => {
-    const now = 1_700_000_000_000;
-    const value = await createSessionValue("old-pw", "secret", now);
-    assert.equal(await verifySessionValue(value, "secret", "new-pw", now + 1000), false);
   });
 
   it("未來時間的 issuedAt 視為無效", async () => {
     const now = 1_700_000_000_000;
-    const value = await createSessionValue("pw123", "secret", now + 10 * MINUTE_SAFE());
-    assert.equal(await verifySessionValue(value, "secret", "pw123", now), false);
+    const value = await createSignedValue({ email: "me@example.com" }, "secret", now + 10 * 60 * 1000);
+    assert.equal(await parseSessionValue(value, "secret", now), null);
   });
 
-  function MINUTE_SAFE() {
-    return 60 * 1000;
-  }
-
   it("格式不完整的 session 值直接拒絕", async () => {
-    const now = 1_700_000_000_000;
-    assert.equal(await verifySessionValue("", "secret", "pw123", now), false);
-    assert.equal(await verifySessionValue("no-signature", "secret", "pw123", now), false);
-    assert.equal(await verifySessionValue(null, "secret", "pw123", now), false);
+    assert.equal(await parseSessionValue("", "secret"), null);
+    assert.equal(await parseSessionValue("no-signature", "secret"), null);
+    assert.equal(await parseSessionValue(null, "secret"), null);
   });
 
   it("payload 遭竄改後簽章驗證失敗", async () => {
     const now = 1_700_000_000_000;
-    const value = await createSessionValue("pw123", "secret", now);
-    const [payload, signature] = value.split(".");
+    const value = await createSignedValue({ email: "me@example.com" }, "secret", now);
+    const [, signature] = value.split(".");
     // 以同一 secret 簽署另一 payload，再拼接回原 signature
-    const forged = await createSessionValue("pw456", "secret", now);
+    const forged = await createSignedValue({ email: "attacker@example.com" }, "secret", now);
     const [forgedPayload] = forged.split(".");
-    assert.equal(await verifySessionValue(`${forgedPayload}.${signature}`, "secret", "pw123", now), false);
-    assert.notEqual(payload, forgedPayload);
+    assert.equal(await parseSessionValue(`${forgedPayload}.${signature}`, "secret", now), null);
+  });
+});
+
+describe("簽章值（state cookie 共用格式）", () => {
+  it("簽章與還原往返一致", async () => {
+    const value = await createSignedValue({ state: "s1", verifier: "v1" }, "secret");
+    const payload = await parseSignedValue(value, "secret");
+    assert.equal(payload.state, "s1");
+    assert.equal(payload.verifier, "v1");
+  });
+
+  it("parseSignedValue 不檢查時效，交由呼叫端判定", async () => {
+    const past = Date.now() - 60 * 60 * 1000;
+    const value = await createSignedValue({ state: "s1" }, "secret", past);
+    const payload = await parseSignedValue(value, "secret");
+    assert.equal(Number(payload.issuedAt), past);
   });
 });
 
@@ -106,40 +103,31 @@ describe("constantTimeCompare", () => {
   });
 });
 
-describe("CSRF token", () => {
-  it("每次產生的 token 皆為 64 字元 hex 且不重複", () => {
-    const a = generateCsrfToken();
-    const b = generateCsrfToken();
-    assert.match(a, /^[0-9a-f]{64}$/);
-    assert.notEqual(a, b);
-  });
-});
-
 describe("cookie 解析與建構", () => {
   it("getSessionFromRequest 解出 URL 編碼的 session 值", () => {
     const request = makeRequest([["ec2_session", "a.b+c/d=e"]]);
     assert.equal(getSessionFromRequest(request), "a.b+c/d=e");
   });
 
-  it("getCsrfTokenFromRequest 解出 csrf cookie", () => {
-    const request = makeRequest([["ec2_session", "x.y"], ["ec2_csrf", "token-1"]]);
-    assert.equal(getCsrfTokenFromRequest(request), "token-1");
+  it("getCookieFromRequest 解出任意名稱的 cookie", () => {
+    const request = makeRequest([["ec2_session", "x.y"], ["oidc_state", "state-1"]]);
+    assert.equal(getCookieFromRequest(request, "oidc_state"), "state-1");
   });
 
   it("支援 Nitro 的 Node 型請求標頭物件", () => {
     const request = {
       headers: {
-        cookie: "ec2_session=session-1; ec2_csrf=csrf-1",
+        cookie: "ec2_session=session-1; oidc_state=state-1",
       },
     };
     assert.equal(getSessionFromRequest(request), "session-1");
-    assert.equal(getCsrfTokenFromRequest(request), "csrf-1");
+    assert.equal(getCookieFromRequest(request, "oidc_state"), "state-1");
   });
 
   it("cookie 缺失時回 null", () => {
     const request = new Request("https://console.example/");
     assert.equal(getSessionFromRequest(request), null);
-    assert.equal(getCsrfTokenFromRequest(request), null);
+    assert.equal(getCookieFromRequest(request, "oidc_state"), null);
   });
 
   it("session cookie 屬性：HttpOnly + Secure + SameSite=Strict + Max-Age 86400", () => {
@@ -151,14 +139,7 @@ describe("cookie 解析與建構", () => {
     assert.ok(cookie.includes("Max-Age=86400"));
   });
 
-  it("csrf cookie 不含 HttpOnly（前端需讀取）", () => {
-    const cookie = buildCsrfCookie("token");
-    assert.ok(cookie.includes("ec2_csrf=token"));
-    assert.ok(!cookie.includes("HttpOnly"));
-  });
-
   it("清除 cookie 的 Max-Age 為 0", () => {
     assert.ok(buildClearedSessionCookie().includes("Max-Age=0"));
-    assert.ok(buildClearedCsrfCookie().includes("Max-Age=0"));
   });
 });

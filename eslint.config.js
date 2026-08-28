@@ -3,6 +3,7 @@ import withNuxt from './.nuxt/eslint.config.mjs'
 
 export default withNuxt(antfu(
   {
+    ignores: ['.zcode/**'],
     rules: {
       // Allow trailing space in comments, for possible JSDoc formattings
       'style/no-trailing-spaces': ['error', { ignoreComments: true }],

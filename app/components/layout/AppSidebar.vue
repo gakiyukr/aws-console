@@ -11,10 +11,10 @@ function resolveNavItemComponent(item: NavLink | NavGroup | NavSectionTitle): an
 
 const { logout } = useLogout()
 
-const { data: session } = useFetch<{ authenticated: boolean, user: { username: string, role: string } | null }>('/api/session')
+const { data: session } = useFetch<{ authenticated: boolean, user: { email: string } | null }>('/api/session')
 const user = computed(() => ({
-  name: session.value?.user?.username || '管理者',
-  email: session.value?.user?.role === 'admin' ? '管理者' : session.value?.user?.role || '',
+  name: session.value?.user?.email || '管理者',
+  email: 'SSO 登入',
   avatar: '/avatars/avatartion.png',
 }))
 </script>
