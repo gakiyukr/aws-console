@@ -13,6 +13,7 @@ import {
   deployWavelengthInstance,
   generateRootPassword,
   initializeWavelengthZone,
+  listEc2Regions,
   listExistingWavelengthInstances,
   listWavelengthInstanceTypes,
   listWavelengthOsOptions,
@@ -85,6 +86,28 @@ describe("chooseAvailableSubnetCidr", () => {
     ]);
 
     assert.equal(cidr, "10.0.100.128/26");
+  });
+});
+
+describe("listEc2Regions", () => {
+  it("列出全部已啟用 Region，不要求存在 Wavelength Zone", async () => {
+    const env = makeEnv({
+      __testHooks: {
+        fetch: async (_url, init) => {
+          assert.equal(readAction(init), "DescribeRegions");
+          return makeXmlResponse(`<?xml version="1.0" encoding="UTF-8"?>
+            <DescribeRegionsResponse>
+              <regionInfo>
+                <item><regionName>us-west-2</regionName><optInStatus>opted-in</optInStatus></item>
+                <item><regionName>ap-east-1</regionName><optInStatus>not-opted-in</optInStatus></item>
+                <item><regionName>eu-west-2</regionName><optInStatus>opt-in-not-required</optInStatus></item>
+              </regionInfo>
+            </DescribeRegionsResponse>`);
+        },
+      },
+    });
+
+    assert.deepEqual(await listEc2Regions(env), ["eu-west-2", "us-west-2"]);
   });
 });
 

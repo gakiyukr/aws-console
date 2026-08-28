@@ -21,7 +21,7 @@ useHead({
 })
 
 const title = 'AWS 主控台'
-const description = 'EC2 電源管理與 Wavelength 部署一站式主控台，基於 Cloudflare Workers 與 D1。'
+const description = 'EC2 與 Wavelength 部署及電源管理主控台，基於 Cloudflare Workers 與 D1。'
 
 useSeoMeta({
   title,

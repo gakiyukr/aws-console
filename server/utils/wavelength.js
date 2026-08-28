@@ -669,6 +669,13 @@ async function describeRegions(env) {
   return parseRegionItems(xml).filter(isRegionEnabled);
 }
 
+/** 列出帳號已啟用的全部 AWS Region，供一般 EC2 部署選擇。 */
+export async function listEc2Regions(env) {
+  return (await describeRegions(env))
+    .map(region => region.regionName)
+    .sort();
+}
+
 export async function listWavelengthRegions(env) {
   const regions = await describeRegions(env);
 

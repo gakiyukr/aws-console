@@ -60,7 +60,6 @@ const progress = ref<ProgressEntry[]>([])
 const isBusy = computed(() => Boolean(busyAction.value))
 const canInitialize = computed(() => form.accountId && form.region && form.zone && form.vpcId)
 const canDeployWavelength = computed(() => canInitialize.value && form.instanceType && form.os)
-const canDeployRegional = computed(() => form.region && form.vpcId && form.os)
 const canDeployExistingForwarder = computed(() => canInitialize.value && form.os && form.existingInstanceId)
 const resultText = computed(() => result.value ? JSON.stringify(result.value, null, 2) : '')
 
@@ -313,15 +312,6 @@ function initializeZone() {
   }, 'Wavelength Zone 初始化完成')
 }
 
-function deployRegional() {
-  return runDeployAction('regional', '/api/wavelength/ec2-deploy', {
-    account_id: form.accountId,
-    region: form.region,
-    vpc_id: form.vpcId,
-    os: form.os,
-  }, '一般區域 EC2 部署流程完成')
-}
-
 function deployWavelength() {
   return runDeployAction('wavelength', '/api/wavelength/deploy', {
     account_id: form.accountId,
@@ -398,7 +388,7 @@ onMounted(loadInitialOptions)
           Wavelength 部署
         </h2>
         <p class="text-sm text-muted-foreground">
-          初始化網路資源並部署 Wavelength、區域 EC2 與 SSH forwarder
+          初始化網路資源並部署 Wavelength EC2 與 SSH forwarder
         </p>
       </div>
       <Button variant="outline" size="sm" :disabled="loadingInitial || isBusy" @click="loadInitialOptions">
@@ -493,10 +483,6 @@ onMounted(loadInitialOptions)
         <Button variant="outline" :disabled="!canInitialize || isBusy" @click="initializeZone">
           <Loader2 v-if="busyAction === 'init'" class="mr-2 h-4 w-4 animate-spin" />
           初始化 WL Zone
-        </Button>
-        <Button variant="outline" :disabled="!canDeployRegional || isBusy" @click="deployRegional">
-          <Loader2 v-if="busyAction === 'regional'" class="mr-2 h-4 w-4 animate-spin" />
-          部署一般 EC2
         </Button>
         <Button :disabled="!canDeployWavelength || isBusy" @click="deployWavelength">
           <Loader2 v-if="busyAction === 'wavelength'" class="mr-2 h-4 w-4 animate-spin" />

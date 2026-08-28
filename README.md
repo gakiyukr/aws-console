@@ -4,7 +4,7 @@
 
 - 管理 D1 清單內 EC2 執行個體的即時狀態與開機、關機操作。
 - 建立及初始化 AWS Wavelength Zone 所需的子網、Carrier Gateway、路由表與安全群組。
-- 部署 Wavelength 執行個體、一般區域 EC2 與 SSH forwarder。
+- 以獨立工作流部署一般區域 EC2、Wavelength 執行個體與 SSH forwarder。
 - 在部署成功後自動將建立的執行個體登錄至電源管理清單。
 - 保存登入限流、電源操作與部署結果的稽核日誌。
 - 在 D1 管理多組 AWS 帳號與主控台使用者；AWS Secret 以 AES-256-GCM 加密後儲存。
@@ -77,6 +77,7 @@ pnpm deploy
 - `/api/machines/:id/action`：白名單機器的開機或關機。
 - `/api/accounts`：AWS 帳號與加密憑證管理；`/:id/test` 可驗證憑證。
 - `/api/users`：D1 主控台使用者管理與密碼替換。
+- `/api/ec2/*`：一般 EC2 的 Region、VPC、作業系統選項與部署流程。
 - `/api/wavelength/*`：Wavelength 探索、初始化與部署流程。
 - `/api/logs`：可依 `account_id`、`action`、`status`、`limit` 讀取稽核日誌。
 

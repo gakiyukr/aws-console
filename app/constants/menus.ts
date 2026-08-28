@@ -10,6 +10,11 @@ export const navMenu: NavMenu[] = [
         link: '/',
       },
       {
+        title: 'EC2 部署',
+        icon: 'i-lucide-server',
+        link: '/ec2',
+      },
+      {
         title: 'Wavelength 部署',
         icon: 'i-lucide-radio-tower',
         link: '/wavelength',
