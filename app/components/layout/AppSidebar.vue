@@ -9,8 +9,6 @@ function resolveNavItemComponent(item: NavLink | NavGroup | NavSectionTitle): an
   return resolveComponent('LayoutSidebarNavLink')
 }
 
-const { logout } = useLogout()
-
 // SSR 期間 useFetch 不會自動轉發 cookie，須明確轉發才能在伺服器端
 // 取得正確的登入狀態
 const { data: session } = useFetch<{ authenticated: boolean, user: { email: string } | null }>('/api/session', {
@@ -40,16 +38,6 @@ const user = computed(() => ({
           {{ nav.heading }}
         </SidebarGroupLabel>
         <component :is="resolveNavItemComponent(item)" v-for="(item, index) in nav.items" :key="index" :item="item" />
-      </SidebarGroup>
-      <SidebarGroup class="mt-auto">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton size="sm" tooltip="登出" @click="logout">
-              <Icon name="i-lucide-log-out" />
-              <span>登出</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>
     <SidebarFooter>
