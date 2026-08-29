@@ -1,9 +1,10 @@
 // OIDC SSO 登入流程：協議細節（discovery、PKCE、授權碼交換、ID token
 // 簽章與 claims 驗證）交由 oauth4webapi（純 Web Crypto，Workers 與
-// node --test 相容），本模組只負責組合流程、email 允許清單比對與
-// 測試用的 fetch 注入（env.__testHooks.fetch）。
+// node --test 相容），本模組只負責組合流程、email 允許清單比對、
+// OOBE 初始設定的輸入正規化與測試用的 fetch 注入（env.__testHooks.fetch）。
 import * as oauth from "oauth4webapi";
 import { OidcError } from "../lib/oidc-error.js";
+import { getSsoConfig } from "./db.js";
 import { createSignedValue, parseSignedValue } from "./auth.js";
 
 // state cookie 名稱；授權碼流程應在數分鐘內完成，逾時即作廢
@@ -15,13 +16,108 @@ const SCOPE = "openid email profile";
 const DISCOVERY_TTL_MS = 600_000;
 const discoveryCache = { key: "", as: null, fetchedAt: 0 };
 
+// D1 內的 OOBE 設定以 isolate 快取 60 秒，避免每個請求都查 D1；
+// 儲存設定後呼叫 clearSsoConfigCache() 立即生效。
+const SSO_DB_CACHE_TTL_MS = 60_000;
+let ssoDbConfigCache = { config: null, checkedAt: 0 };
+
 /** 組出 IdP callback 的 redirect URI。 */
 export function buildCallbackRedirectUri(origin) {
   return new URL("/api/auth/callback", origin).href;
 }
 
+/** OOBE 表單輸入的正規化與驗證；回傳 { config, email } 或 { error }。 */
+export function normalizeSetupInput(input) {
+  const email = String(input?.email || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(email)) {
+    return { error: "綁定 email 格式無效" };
+  }
+  const clientId = String(input?.clientId || "").trim();
+  const clientSecret = String(input?.clientSecret || "");
+  if (!clientId) {
+    return { error: "Client ID 為必填" };
+  }
+  if (!clientSecret) {
+    return { error: "Client secret 為必填" };
+  }
+
+  const issuer = String(input?.issuer || "").trim().replace(/\/+$/, "");
+  const authorizationEndpoint = String(input?.authorizationUrl || "").trim();
+  const tokenEndpoint = String(input?.tokenUrl || "").trim();
+  const jwksUri = String(input?.jwksUrl || "").trim();
+
+  for (const url of [issuer, authorizationEndpoint, tokenEndpoint, jwksUri].filter(Boolean)) {
+    if (!/^https:\/\//i.test(url)) {
+      return { error: "URL 必須以 https:// 開頭" };
+    }
+  }
+  if (authorizationEndpoint || tokenEndpoint || jwksUri) {
+    if (!(authorizationEndpoint && tokenEndpoint && jwksUri)) {
+      return { error: "明確端點模式需同時填齊授權、token 與 JWKS 三個端點" };
+    }
+  } else if (!issuer) {
+    return { error: "請填入 Discovery URL，或同時填齊三個明確端點" };
+  }
+
+  return {
+    config: {
+      issuer,
+      issuerUrl: issuer ? new URL(issuer) : null,
+      clientId,
+      clientSecret,
+      allowedEmails: [email],
+      authorizationEndpoint,
+      tokenEndpoint,
+      jwksUri,
+    },
+    email,
+  };
+}
+
 /**
- * 讀取並驗證 OIDC 環境變數；缺任一必填項回 null，由呼叫端 fail closed。
+ * 解析生效的 OIDC 設定：D1 內的 OOBE 設定優先，其次退回環境變數。
+ * D1 結果（含「未設定」狀態）快取 60 秒。
+ */
+export async function resolveOidcConfig(env) {
+  if (env?.DB && env?.CREDENTIAL_ENCRYPTION_KEY) {
+    const now = Date.now();
+    if (now - ssoDbConfigCache.checkedAt > SSO_DB_CACHE_TTL_MS) {
+      let fromDb = null;
+      try {
+        const stored = await getSsoConfig(env.DB, env.CREDENTIAL_ENCRYPTION_KEY);
+        if (stored) {
+          fromDb = {
+            issuer: stored.issuer,
+            issuerUrl: new URL(stored.issuer),
+            clientId: stored.clientId,
+            clientSecret: stored.clientSecret,
+            allowedEmails: [stored.allowedEmail.toLowerCase()],
+            authorizationEndpoint: stored.authorizationEndpoint,
+            tokenEndpoint: stored.tokenEndpoint,
+            jwksUri: stored.jwksUri,
+          };
+        }
+      } catch {
+        // 解密失敗（如主金鑰已更換）視同未設定，走 fail closed
+        fromDb = null;
+      }
+      ssoDbConfigCache = { config: fromDb, checkedAt: now };
+    }
+    if (ssoDbConfigCache.config) {
+      return ssoDbConfigCache.config;
+    }
+  }
+  return getOidcConfig(env);
+}
+
+/** 變更 D1 內 SSO 設定後呼叫，使設定快取立即失效。 */
+export function clearSsoConfigCache() {
+  ssoDbConfigCache = { config: null, checkedAt: 0 };
+}
+
+/**
+ * 讀取並驗證環境變數的 OIDC 設定；缺任一必填項回 null。
+ * （OOBE 設定存於 D1，環境變數為替代/備援管道。）
  */
 export function getOidcConfig(env) {
   const issuer = env?.OIDC_ISSUER;
@@ -35,8 +131,6 @@ export function getOidcConfig(env) {
     return null;
   }
   return {
-    // issuer 保留原始字串：ID token 的 iss 比對是精確字串比對，
-    // 經 new URL().href 正規化可能補上尾斜線而導致不符
     issuer,
     issuerUrl: new URL(issuer),
     clientId,
@@ -50,13 +144,13 @@ export function getOidcConfig(env) {
 }
 
 /** 部署環境是否完成 OIDC 設定（middleware 與登入路由共用）。 */
-export function isOidcConfigured(env) {
-  return getOidcConfig(env) !== null;
+export async function isOidcConfigured(env) {
+  return (await resolveOidcConfig(env)) !== null;
 }
 
 /** session 內 email 是否在允許清單中。 */
-export function isAllowedEmail(env, email) {
-  const config = getOidcConfig(env);
+export async function isAllowedEmail(env, email) {
+  const config = await resolveOidcConfig(env);
   return Boolean(config && config.allowedEmails.includes(String(email).toLowerCase()));
 }
 
@@ -93,14 +187,45 @@ async function resolveAuthorizationServer(config, fetchImpl) {
 }
 
 /**
+ * OOBE「測試連線」：正規化輸入並解析 IdP metadata（discovery 或
+ * 組出明確端點），不發起登入。回傳 { ok, ... } 供表單顯示。
+ */
+export async function probeOidcSetup(setupInput, fetchImpl = fetch) {
+  const normalized = normalizeSetupInput(setupInput);
+  if (normalized.error) {
+    return { ok: false, error: normalized.error };
+  }
+  try {
+    const as = await resolveAuthorizationServer(normalized.config, fetchImpl);
+    return { ok: true, issuer: as.issuer, authorizationEndpoint: as.authorization_endpoint };
+  } catch (error) {
+    return { ok: false, error: error?.message || "無法取得 IdP metadata" };
+  }
+}
+
+/**
  * 產生登入導向 URL 與 state cookie。
  * state/nonce/PKCE verifier 以 SESSION_SECRET 簽章存入短效 HttpOnly
  * cookie，callback 時比對 cookie 與 query，防偽造與 CSRF。
+ * setupInput 存在時為 OOBE 流程：設定（含 client secret）暫存於
+ * state cookie，完成驗證並比對 email 後才寫入 D1。
  */
-export async function startLogin(env, redirectUri) {
-  const config = getOidcConfig(env);
-  if (!config || !env?.SESSION_SECRET) {
-    throw new OidcError("configuration", 503);
+export async function startLogin(env, redirectUri, setupInput = null) {
+  let config;
+  if (setupInput) {
+    const normalized = normalizeSetupInput(setupInput);
+    if (normalized.error) {
+      throw new OidcError("configuration", 400);
+    }
+    config = normalized.config;
+  } else {
+    if (!env?.SESSION_SECRET) {
+      throw new OidcError("configuration", 503);
+    }
+    config = await resolveOidcConfig(env);
+    if (!config) {
+      throw new OidcError("configuration", 503);
+    }
   }
   const fetchImpl = env.__testHooks?.fetch || fetch;
   const as = await resolveAuthorizationServer(config, fetchImpl);
@@ -124,7 +249,15 @@ export async function startLogin(env, redirectUri) {
     url.searchParams.set(key, value);
   }
 
-  const stateValue = await createSignedValue({ state, nonce, verifier }, env.SESSION_SECRET);
+  const stateValue = await createSignedValue(
+    {
+      state,
+      nonce,
+      verifier,
+      ...(setupInput ? { setup: setupInput } : {}),
+    },
+    env.SESSION_SECRET,
+  );
   return {
     redirectUrl: url.href,
     stateCookie:
@@ -140,15 +273,13 @@ export function buildClearedStateCookie() {
 /**
  * 處理 IdP callback：驗 state、交換授權碼並驗證 ID token（簽章、
  * iss/aud/exp 由 oauth4webapi 依 metadata 檢查、nonce 於此處傳入），
- * 最後比對 email 允許清單。成功回傳登入者 email。
+ * 最後比對 email 允許清單。OOBE 流程的允許清單為 setup 暫存的
+ * 綁定 email。成功回傳 { email, setup }；setup 存在表示需寫入 D1。
  */
 export async function completeLogin(env, redirectUri, query, stateValue) {
-  const config = getOidcConfig(env);
-  if (!config || !env?.SESSION_SECRET) {
+  if (!env?.SESSION_SECRET) {
     throw new OidcError("configuration", 503);
   }
-  const fetchImpl = env.__testHooks?.fetch || fetch;
-  const as = await resolveAuthorizationServer(config, fetchImpl);
 
   const stored = await parseSignedValue(stateValue, env.SESSION_SECRET);
   if (
@@ -158,6 +289,30 @@ export async function completeLogin(env, redirectUri, query, stateValue) {
     || Date.now() - Number(stored.issuedAt) > STATE_MAX_AGE_S * 1000
   ) {
     throw new OidcError("state_mismatch");
+  }
+
+  const pendingSetup = stored.setup ?? null;
+  let config;
+  if (pendingSetup) {
+    const normalized = normalizeSetupInput(pendingSetup);
+    if (normalized.error) {
+      throw new OidcError("configuration", 503);
+    }
+    config = normalized.config;
+  } else {
+    config = await resolveOidcConfig(env);
+    if (!config) {
+      throw new OidcError("configuration", 503);
+    }
+  }
+
+  const fetchImpl = env.__testHooks?.fetch || fetch;
+  // startLogin 已解析過 metadata，此處通常命中快取
+  let as;
+  try {
+    as = await resolveAuthorizationServer(config, fetchImpl);
+  } catch {
+    throw new OidcError("configuration", 503);
   }
 
   const callbackParams = new URLSearchParams();
@@ -205,8 +360,22 @@ export async function completeLogin(env, redirectUri, query, stateValue) {
 
   const claims = oauth.getValidatedIdTokenClaims(tokens);
   const email = String(claims?.email || "").toLowerCase();
-  if (!email || !config.allowedEmails.includes(email)) {
-    throw new OidcError("email_not_allowed", 403);
+  const allowedEmails = pendingSetup ? [pendingSetup.email.toLowerCase()] : config.allowedEmails;
+  if (!email || !allowedEmails.includes(email)) {
+    throw new OidcError(pendingSetup ? "email_mismatch" : "email_not_allowed", 403);
   }
-  return { email };
+  return {
+    email,
+    setup: pendingSetup
+      ? {
+          issuer: config.issuer,
+          authorizationUrl: config.authorizationEndpoint,
+          tokenUrl: config.tokenEndpoint,
+          jwksUrl: config.jwksUri,
+          clientId: config.clientId,
+          clientSecret: config.clientSecret,
+          email: pendingSetup.email,
+        }
+      : null,
+  };
 }

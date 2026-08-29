@@ -3,7 +3,7 @@
 // 子請求會超出限制，故本中介層在伺服器端直接跳過。
 // 客戶端 SPA 導航不會經過伺服器中介層，此處補上 session 檢查，
 // 避免已登出的分頁在站內導航時停在只剩外殼的受保護頁面。
-const PUBLIC_PATHS = new Set(['/login', '/401', '/403', '/404', '/500', '/503'])
+const PUBLIC_PATHS = new Set(['/login', '/setup', '/401', '/403', '/404', '/500', '/503'])
 
 export default defineNuxtRouteMiddleware(async (to) => {
   if (import.meta.server) {

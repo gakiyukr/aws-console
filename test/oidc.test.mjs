@@ -8,13 +8,19 @@ import { describe, it } from "node:test";
 
 import { createSignedValue } from "../server/utils/auth.js";
 import { OidcError } from "../server/lib/oidc-error.js";
+import { getSsoConfig, saveSsoConfig } from "../server/utils/db.js";
 import {
+  clearSsoConfigCache,
   completeLogin,
   getOidcConfig,
   isAllowedEmail,
   isOidcConfigured,
+  normalizeSetupInput,
+  probeOidcSetup,
+  resolveOidcConfig,
   startLogin,
 } from "../server/utils/oidc.js";
+import { createDb } from "./d1-stub.js";
 
 const CLIENT_ID = "console-client";
 const REDIRECT_URI = "https://console.example/api/auth/callback";
@@ -132,8 +138,19 @@ function makeStateValue(overrides = {}, secret = "session-secret") {
 
 const CALLBACK_QUERY = { code: "auth-code", state: "st-1" };
 
+// 32 位元組的固定測試主金鑰（Base64）
+const ENCRYPTION_KEY = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
+
+const SETUP_ISSUER = "https://setup.example.com";
+const VALID_SETUP_INPUT = {
+  email: EMAIL,
+  issuer: SETUP_ISSUER,
+  clientId: CLIENT_ID,
+  clientSecret: "client-secret",
+};
+
 describe("getOidcConfig", () => {
-  it("設定齊全時回傳正規化設定（email 轉小寫）", () => {
+  it("設定齊全時回傳正規化設定（email 轉小寫）", async () => {
     const env = {
       OIDC_ISSUER: "https://idp.example.com",
       OIDC_CLIENT_ID: CLIENT_ID,
@@ -142,11 +159,11 @@ describe("getOidcConfig", () => {
     };
     const config = getOidcConfig(env);
     assert.deepEqual(config.allowedEmails, ["me@example.com", "other@example.com"]);
-    assert.ok(isOidcConfigured(env));
-    assert.ok(isAllowedEmail(env, "Me@Example.COM"));
+    assert.ok(await isOidcConfigured(env));
+    assert.ok(await isAllowedEmail(env, "Me@Example.COM"));
   });
 
-  it("缺任一必填項時回 null 且視為未設定", () => {
+  it("缺任一必填項時回 null 且視為未設定", async () => {
     const env = {
       OIDC_ISSUER: "https://idp.example.com",
       OIDC_CLIENT_ID: CLIENT_ID,
@@ -154,8 +171,175 @@ describe("getOidcConfig", () => {
       OIDC_ALLOWED_EMAILS: "",
     };
     assert.equal(getOidcConfig(env), null);
-    assert.equal(isOidcConfigured(env), false);
-    assert.equal(isAllowedEmail(env, EMAIL), false);
+    assert.equal(await isOidcConfigured(env), false);
+    assert.equal(await isAllowedEmail(env, EMAIL), false);
+  });
+});
+
+describe("normalizeSetupInput", () => {
+  it("Discovery 模式：回傳設定與綁定 email", () => {
+    const result = normalizeSetupInput(VALID_SETUP_INPUT);
+    assert.equal(result.error, undefined);
+    assert.equal(result.email, EMAIL);
+    assert.equal(result.config.allowedEmails[0], EMAIL);
+    assert.equal(result.config.issuer, SETUP_ISSUER);
+  });
+
+  it("email、client secret 缺漏與非 https URL 皆被拒絕", () => {
+    assert.match(normalizeSetupInput({ ...VALID_SETUP_INPUT, email: "nope" }).error, /email/);
+    assert.match(normalizeSetupInput({ ...VALID_SETUP_INPUT, clientSecret: "" }).error, /secret/);
+    assert.match(
+      normalizeSetupInput({ ...VALID_SETUP_INPUT, issuer: "http://idp.example.com" }).error,
+      /https/,
+    );
+  });
+
+  it("明確端點模式需三個端點齊全；兩者皆缺時提示", () => {
+    const partial = normalizeSetupInput({
+      ...VALID_SETUP_INPUT,
+      issuer: "",
+      authorizationUrl: "https://idp.example.com/authorize",
+    });
+    assert.match(partial.error, /三個端點/);
+    const none = normalizeSetupInput({ ...VALID_SETUP_INPUT, issuer: "" });
+    assert.match(none.error, /Discovery/);
+    const full = normalizeSetupInput({
+      ...VALID_SETUP_INPUT,
+      issuer: "",
+      authorizationUrl: "https://idp.example.com/authorize",
+      tokenUrl: "https://idp.example.com/token",
+      jwksUrl: "https://idp.example.com/jwks",
+    });
+    assert.equal(full.error, undefined);
+    assert.equal(full.config.authorizationEndpoint, "https://idp.example.com/authorize");
+  });
+});
+
+describe("probeOidcSetup", () => {
+  it("輸入有效時解析出 IdP metadata", async () => {
+    const { env, issuer } = await makeRig();
+    const result = await probeOidcSetup({ ...VALID_SETUP_INPUT, issuer }, env.__testHooks.fetch);
+    assert.equal(result.ok, true);
+    assert.equal(result.issuer, issuer);
+  });
+
+  it("discovery 失敗時回傳可顯示的錯誤", async () => {
+    const result = await probeOidcSetup(
+      { ...VALID_SETUP_INPUT, issuer: "https://unreachable.example.com" },
+      async () => {
+        throw new Error("network down");
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /network down|metadata/);
+  });
+});
+
+describe("OOBE 設定存取（D1）", () => {
+  it("saveSsoConfig 後 getSsoConfig 可解密還原，resolveOidcConfig 以 D1 優先", async () => {
+    const db = createDb();
+    assert.equal(await getSsoConfig(db, ENCRYPTION_KEY), null);
+
+    await saveSsoConfig(db, {
+      issuer: SETUP_ISSUER,
+      authorizationEndpoint: `${SETUP_ISSUER}/authorize`,
+      tokenEndpoint: `${SETUP_ISSUER}/token`,
+      jwksUri: `${SETUP_ISSUER}/jwks`,
+      clientId: CLIENT_ID,
+      clientSecret: "oidc-secret",
+      allowedEmail: EMAIL,
+    }, ENCRYPTION_KEY);
+
+    const stored = await getSsoConfig(db, ENCRYPTION_KEY);
+    assert.equal(stored.clientSecret, "oidc-secret");
+    assert.equal(stored.allowedEmail, EMAIL);
+    assert.ok(!stored.clientSecretCiphertext.includes("oidc-secret"));
+
+    // resolveOidcConfig：有 D1 設定時即使環境變數缺漏也回 D1 內容
+    clearSsoConfigCache();
+    const env = { DB: db, CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY };
+    const resolved = await resolveOidcConfig(env);
+    assert.equal(resolved.clientId, CLIENT_ID);
+    assert.equal(resolved.clientSecret, "oidc-secret");
+    assert.deepEqual(resolved.allowedEmails, [EMAIL]);
+    clearSsoConfigCache();
+  });
+
+  it("重複儲存為單列 upsert，主金鑰不符時視同未設定", async () => {
+    const db = createDb();
+    const config = {
+      issuer: SETUP_ISSUER,
+      authorizationEndpoint: "",
+      tokenEndpoint: "",
+      jwksUri: "",
+      clientId: CLIENT_ID,
+      clientSecret: "oidc-secret",
+      allowedEmail: EMAIL,
+    };
+    await saveSsoConfig(db, config, ENCRYPTION_KEY);
+    await saveSsoConfig(db, { ...config, clientSecret: "rotated" }, ENCRYPTION_KEY);
+    assert.equal((await getSsoConfig(db, ENCRYPTION_KEY)).clientSecret, "rotated");
+
+    clearSsoConfigCache();
+    const env = { DB: db, CREDENTIAL_ENCRYPTION_KEY: Buffer.from("ffffffffffffffffffffffffffffffff").toString("base64") };
+    assert.equal(await resolveOidcConfig(env), null);
+    clearSsoConfigCache();
+  });
+});
+
+describe("completeLogin 的 OOBE 流程", () => {
+  it("setup 暫存設定完成驗證後回傳 setup，email 不符時拒絕", async () => {
+    const { env, issuer } = await makeRig();
+    const stateValue = await createSignedValue(
+      {
+        state: "st-1",
+        nonce: "no-1",
+        verifier: "pkce-verifier",
+        setup: { ...VALID_SETUP_INPUT, issuer },
+      },
+      "session-secret",
+    );
+
+    const { email, setup } = await completeLogin(env, REDIRECT_URI, CALLBACK_QUERY, stateValue);
+    assert.equal(email, EMAIL);
+    assert.equal(setup.email, EMAIL);
+    assert.equal(setup.clientSecret, "client-secret");
+  });
+
+  it("setup 流程中 IdP 回傳的 email 與綁定 email 不符時拒絕", async () => {
+    const { env, issuer } = await makeRig({ claims: { email: "stranger@example.com" } });
+    const stateValue = await createSignedValue(
+      {
+        state: "st-1",
+        nonce: "no-1",
+        verifier: "pkce-verifier",
+        setup: { ...VALID_SETUP_INPUT, issuer },
+      },
+      "session-secret",
+    );
+
+    await assert.rejects(
+      completeLogin(env, REDIRECT_URI, CALLBACK_QUERY, stateValue),
+      (error) => error instanceof OidcError && error.code === "email_mismatch",
+    );
+  });
+
+  it("setup 輸入在 cookie 內遭竄改（缺 client secret）時拒絕", async () => {
+    const { env } = await makeRig();
+    const stateValue = await createSignedValue(
+      {
+        state: "st-1",
+        nonce: "no-1",
+        verifier: "pkce-verifier",
+        setup: { ...VALID_SETUP_INPUT, issuer: SETUP_ISSUER, clientSecret: "" },
+      },
+      "session-secret",
+    );
+
+    await assert.rejects(
+      completeLogin(env, REDIRECT_URI, CALLBACK_QUERY, stateValue),
+      (error) => error instanceof OidcError && error.code === "configuration",
+    );
   });
 });
 

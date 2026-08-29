@@ -7,7 +7,7 @@ const isRedirecting = ref(false)
 const route = useRoute()
 
 const ERROR_MESSAGES: Record<string, string> = {
-  configuration: '伺服器尚未完成 SSO 設定，請聯絡管理者。',
+  configuration: '伺服器尚未完成 SSO 設定。',
   idp_error: '登入流程被 IdP 中止，請再試一次。',
   state_mismatch: '登入流程已逾時或狀態不符，請重新登入。',
   email_not_allowed: '此帳號未獲授權使用本主控台。',
@@ -18,6 +18,9 @@ const errorMessage = computed(() => {
   const code = typeof route.query.error === 'string' ? route.query.error : ''
   return code ? (ERROR_MESSAGES[code] || '登入失敗，請再試一次。') : ''
 })
+
+// 尚未完成 SSO 設定時，提供前往 OOBE 初始設定的入口
+const needsSetup = computed(() => route.query.error === 'configuration')
 
 function startLogin() {
   if (isRedirecting.value)
@@ -40,6 +43,13 @@ function startLogin() {
     <p v-if="errorMessage" class="text-sm text-destructive">
       {{ errorMessage }}
     </p>
+    <NuxtLink
+      v-if="needsSetup"
+      to="/setup"
+      class="text-sm text-center underline-offset-4 hover:underline"
+    >
+      前往初始設定（OOBE）
+    </NuxtLink>
     <Button class="w-full" :disabled="isRedirecting" @click="startLogin">
       <Loader2 v-if="isRedirecting" class="mr-2 h-4 w-4 animate-spin" />
       <LogIn v-else class="mr-2 h-4 w-4" />

@@ -2,6 +2,7 @@
 // 使業務邏輯可在 node --test 以記憶體 D1 樁直接驗證。
 // 慣例：每個函式的第一個參數都是 D1 binding（env.DB），
 // 不在模組內持有任何連線狀態，以符合 Workers 每請求注入的模式。
+import { decryptOidcClientSecret, encryptOidcClientSecret } from "./credential-crypto.js";
 
 // ─── 機器清單 ───────────────────────────────────────────────
 
@@ -221,3 +222,46 @@ export async function deleteAwsAccount(db, id) {
   return { deleted: (result.meta.changes ?? 0) > 0 };
 }
 
+
+// ─── SSO 設定（OOBE 初始設定） ──────────────────────────────
+
+/**
+ * 取得 D1 內的 SSO 設定；未設定時回 null。client secret 於此解密。
+ * @param {D1Database} db
+ * @param {string} encryptionKey CREDENTIAL_ENCRYPTION_KEY（Base64）
+ * @returns {Promise<{issuer:string, authorizationEndpoint:string, tokenEndpoint:string, jwksUri:string, clientId:string, clientSecret:string, allowedEmail:string}|null>}
+ */
+export async function getSsoConfig(db, encryptionKey) {
+  const row = await db
+    .prepare(`SELECT issuer, authorization_endpoint AS authorizationEndpoint, token_endpoint AS tokenEndpoint,
+      jwks_uri AS jwksUri, client_id AS clientId, client_secret_ciphertext AS clientSecretCiphertext,
+      client_secret_iv AS clientSecretIv, allowed_email AS allowedEmail FROM sso_config WHERE id = 1`)
+    .first();
+  if (!row) {
+    return null;
+  }
+  const clientSecret = await decryptOidcClientSecret(row, encryptionKey);
+  return { ...row, clientSecret };
+}
+
+/**
+ * 儲存 OOBE 完成 SSO 驗證後的設定（單列 upsert）；client secret 加密後寫入。
+ */
+export async function saveSsoConfig(db, config, encryptionKey) {
+  const encrypted = await encryptOidcClientSecret(config.clientSecret, encryptionKey);
+  const existing = await db.prepare("SELECT id FROM sso_config WHERE id = 1").first();
+  if (existing) {
+    await db.prepare(`UPDATE sso_config SET issuer = ?1, authorization_endpoint = ?2, token_endpoint = ?3,
+      jwks_uri = ?4, client_id = ?5, client_secret_ciphertext = ?6, client_secret_iv = ?7,
+      allowed_email = ?8, updated_at = datetime('now') WHERE id = 1`)
+      .bind(config.issuer, config.authorizationEndpoint, config.tokenEndpoint, config.jwksUri, config.clientId, encrypted.clientSecretCiphertext, encrypted.clientSecretIv, config.allowedEmail)
+      .run();
+    return;
+  }
+  await db
+    .prepare(`INSERT INTO sso_config (id, issuer, authorization_endpoint, token_endpoint, jwks_uri,
+      client_id, client_secret_ciphertext, client_secret_iv, allowed_email)
+      VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
+    .bind(config.issuer, config.authorizationEndpoint, config.tokenEndpoint, config.jwksUri, config.clientId, encrypted.clientSecretCiphertext, encrypted.clientSecretIv, config.allowedEmail)
+    .run();
+}

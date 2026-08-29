@@ -29,7 +29,25 @@ pnpm dev:worker
 
 ## SSO 登入設定
 
-登入採標準 OIDC Authorization Code + PKCE（`oauth4webapi`），IdP 可為 Cloudflare Access（SaaS app 模式，非邊緣代理）、Google、GitLab 等任何支援 discovery 的 OIDC 提供者。登入成功者僅限 `OIDC_ALLOWED_EMAILS` 允許清單內的 email。
+登入採標準 OIDC Authorization Code + PKCE（`oauth4webapi`），IdP 可為 Cloudflare Access（SaaS app 模式，非邊緣代理）、Google、GitLab 等任何支援 discovery 的 OIDC 提供者。登入成功者僅限綁定 email。
+
+### 首次執行（OOBE 初始設定）
+
+全新部署後開啟網站會自動進入 `/setup` 初始設定精靈：
+
+1. 填入**綁定 email**（完成驗證後僅此 email 能登入）與 IdP 資訊（Discovery URL，或三個明確端點）、Client ID／Secret。
+2. 「測試連線」會解析 IdP metadata 驗證設定。
+3. 「開始 SSO 驗證」導向 IdP 完成一次真實登入；**回頭的 email 與綁定 email 一致**時設定才會存入 D1（client secret 以 `CREDENTIAL_ENCRYPTION_KEY` 加密），並直接登入主控台。
+
+設定完成後 `/setup` 會封鎖；重新設定需清除 D1 設定：
+
+```bash
+pnpm exec wrangler --config .output/server/wrangler.json d1 execute DB --remote --command "DELETE FROM sso_config"
+```
+
+### 以環境變數設定（替代管道）
+
+不改用 OOBE 時，也可完全以環境變數提供設定（D1 內的 OOBE 設定優先於環境變數）：
 
 以 Cloudflare Access 為 IdP 的設定步驟：
 
@@ -93,6 +111,7 @@ pnpm deploy
 
 - `/api/auth/login`：SSO 登入入口，302 導向 IdP 授權端點。
 - `/api/auth/callback`：IdP 回調，驗證後簽發 session。
+- `/api/setup/*`：OOBE 初始設定的測試連線與驗證啟動。
 - `/api/machines`：EC2 管理清單與即時狀態。
 - `/api/machines/:id/action`：白名單機器的開機或關機。
 - `/api/accounts`：AWS 帳號與加密憑證管理；`/:id/test` 可驗證憑證。

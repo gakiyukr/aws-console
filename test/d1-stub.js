@@ -283,10 +283,10 @@ export class D1Stub {
   }
 }
 
-/** 建立已套用 0001_init schema（0004 起移除 users 與 login_rate_limit）的樁。 */
+/** 建立已套用 0001–0005 schema（空表）的樁。 */
 export function createDb() {
   const stub = new D1Stub();
-  for (const name of ["machines", "operation_log", "aws_accounts"]) {
+  for (const name of ["machines", "operation_log", "aws_accounts", "sso_config"]) {
     stub.createTable(name);
   }
   return stub;

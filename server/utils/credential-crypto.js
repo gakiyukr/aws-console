@@ -78,3 +78,46 @@ export async function decryptAwsCredentials(account, base64Key) {
 export function generateCredentialEncryptionKey() {
   return bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
 }
+
+// OIDC client secret 使用獨立 AAD 網域，與 AWS 憑證密文隔離
+const OIDC_SECRET_AAD = new TextEncoder().encode(`aws-console-oidc-secret:v${KEY_VERSION}`);
+
+/** 將 OIDC client secret 加密為可寫入 D1 的欄位；回傳值不包含明文。 */
+export async function encryptOidcClientSecret(secret, base64Key) {
+  if (typeof secret !== "string" || !secret) {
+    throw new Error("client secret 為必填");
+  }
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await importEncryptionKey(base64Key);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: OIDC_SECRET_AAD, tagLength: 128 },
+    key,
+    new TextEncoder().encode(secret),
+  );
+  return {
+    clientSecretCiphertext: bytesToBase64(new Uint8Array(encrypted)),
+    clientSecretIv: bytesToBase64(iv),
+  };
+}
+
+/** 解密 D1 內的 OIDC client secret；只有伺服器端登入流程可使用。 */
+export async function decryptOidcClientSecret(record, base64Key) {
+  try {
+    const key = await importEncryptionKey(base64Key);
+    const decrypted = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64ToBytes(record.clientSecretIv),
+        additionalData: OIDC_SECRET_AAD,
+        tagLength: 128,
+      },
+      key,
+      base64ToBytes(record.clientSecretCiphertext),
+    );
+    return new TextDecoder().decode(decrypted);
+  } catch (error) {
+    if (String(error?.message || "").includes("CREDENTIAL_ENCRYPTION_KEY"))
+      throw error;
+    throw new Error("OIDC client secret 解密失敗，請確認加密主金鑰未被更換");
+  }
+}
