@@ -127,24 +127,31 @@ async function startVerification() {
           </div>
 
           <div class="grid gap-2">
-            <Label for="setup-issuer">IdP Discovery URL</Label>
+            <Label for="setup-issuer">IdP Issuer URL</Label>
             <Input
               id="setup-issuer"
               v-model="form.issuer"
-              placeholder="https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<app-id>"
+              placeholder="https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<AUD>"
               autocomplete="off"
               :disabled="starting"
             />
+            <p class="text-xs text-muted-foreground">
+              IdP 頁面顯示的 Issuer / Discovery URL。Cloudflare Access 的最後一段是
+              <span class="font-mono">AUD</span>，不是 Client ID。
+            </p>
             <button
               type="button"
               class="text-xs text-muted-foreground underline-offset-4 hover:underline"
               @click="showAdvanced = !showAdvanced"
             >
-              {{ showAdvanced ? '收進階端點設定' : 'IdP 不支援 discovery？改用明確端點' }}
+              {{ showAdvanced ? '收起明確端點設定' : 'discovery 無效？改填 IdP 提供的三個明確端點' }}
             </button>
           </div>
 
           <div v-if="showAdvanced" class="grid gap-2 rounded-md border p-3">
+            <p class="text-xs text-muted-foreground">
+              Cloudflare Access 的 SaaS 應用程式頁面會直接列出這三個端點；填齊後跳過 discovery（Issuer 仍須填寫）。
+            </p>
             <div class="grid gap-2">
               <Label for="setup-authz">授權端點</Label>
               <Input id="setup-authz" v-model="form.authorizationUrl" placeholder="https://.../authorization" autocomplete="off" :disabled="starting" />

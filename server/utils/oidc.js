@@ -46,6 +46,10 @@ export function normalizeSetupInput(input) {
   const tokenEndpoint = String(input?.tokenUrl || "").trim();
   const jwksUri = String(input?.jwksUrl || "").trim();
 
+  // Issuer 恆為必填：除 discovery 外，ID token 的 iss 驗證也以它為準
+  if (!issuer) {
+    return { error: "Issuer URL 為必填（IdP 頁面顯示的 Issuer / Discovery URL）" };
+  }
   for (const url of [issuer, authorizationEndpoint, tokenEndpoint, jwksUri].filter(Boolean)) {
     if (!/^https:\/\//i.test(url)) {
       return { error: "URL 必須以 https:// 開頭" };
@@ -55,8 +59,6 @@ export function normalizeSetupInput(input) {
     if (!(authorizationEndpoint && tokenEndpoint && jwksUri)) {
       return { error: "明確端點模式需同時填齊授權、token 與 JWKS 三個端點" };
     }
-  } else if (!issuer) {
-    return { error: "請填入 Discovery URL，或同時填齊三個明確端點" };
   }
 
   return {
@@ -188,7 +190,8 @@ async function resolveAuthorizationServer(config, fetchImpl) {
 
 /**
  * OOBE「測試連線」：正規化輸入並解析 IdP metadata（discovery 或
- * 組出明確端點），不發起登入。回傳 { ok, ... } 供表單顯示。
+ * 組出明確端點），不發起登入。回傳 { ok, ... } 供表單顯示；
+ * 常見失敗（404、issuer 不符）轉為可執行的修正建議。
  */
 export async function probeOidcSetup(setupInput, fetchImpl = fetch) {
   const normalized = normalizeSetupInput(setupInput);
@@ -199,6 +202,20 @@ export async function probeOidcSetup(setupInput, fetchImpl = fetch) {
     const as = await resolveAuthorizationServer(normalized.config, fetchImpl);
     return { ok: true, issuer: as.issuer, authorizationEndpoint: as.authorization_endpoint };
   } catch (error) {
+    const raw = String(error?.message || "");
+    if (raw.includes("issuer")) {
+      return {
+        ok: false,
+        error: "discovery 文件存在，但其 issuer 與輸入的 Issuer URL 不符；請以 IdP 頁面顯示的 Issuer 為準。",
+      };
+    }
+    if (raw.includes("status code")) {
+      const status = error?.cause?.response?.status;
+      return {
+        ok: false,
+        error: `無法取得 IdP discovery 文件${status ? `（HTTP ${status}）` : ""}。請確認 URL 最後一段是 IdP 頁面顯示的 AUD / 應用程式 ID（不是 Client ID），或展開設定改填 IdP 提供的三個明確端點。`,
+      };
+    }
     return { ok: false, error: error?.message || "無法取得 IdP metadata" };
   }
 }

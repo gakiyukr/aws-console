@@ -194,18 +194,25 @@ describe("normalizeSetupInput", () => {
     );
   });
 
-  it("明確端點模式需三個端點齊全；兩者皆缺時提示", () => {
+  it("明確端點模式需三個端點齊全，且 Issuer 恆為必填", () => {
     const partial = normalizeSetupInput({
       ...VALID_SETUP_INPUT,
       issuer: "",
       authorizationUrl: "https://idp.example.com/authorize",
     });
-    assert.match(partial.error, /三個端點/);
+    assert.match(partial.error, /Issuer URL 為必填/);
     const none = normalizeSetupInput({ ...VALID_SETUP_INPUT, issuer: "" });
-    assert.match(none.error, /Discovery/);
-    const full = normalizeSetupInput({
+    assert.match(none.error, /Issuer URL 為必填/);
+    const endpointsOnly = normalizeSetupInput({
       ...VALID_SETUP_INPUT,
       issuer: "",
+      authorizationUrl: "https://idp.example.com/authorize",
+      tokenUrl: "https://idp.example.com/token",
+      jwksUrl: "https://idp.example.com/jwks",
+    });
+    assert.match(endpointsOnly.error, /Issuer URL 為必填/);
+    const full = normalizeSetupInput({
+      ...VALID_SETUP_INPUT,
       authorizationUrl: "https://idp.example.com/authorize",
       tokenUrl: "https://idp.example.com/token",
       jwksUrl: "https://idp.example.com/jwks",
