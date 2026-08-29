@@ -81,6 +81,10 @@ export default defineEventHandler(async (event) => {
   if (authenticated && (isLoginPage || isSetupPage)) {
     return sendRedirect(event, "/", 302);
   }
+  // 已完成設定但未登入：OOBE 精靈已無意義，導回登入頁
+  if (isSetupPage) {
+    return sendRedirect(event, "/login", 302);
+  }
   if (isProtectedPage && !authenticated) {
     return sendRedirect(event, "/login", 302);
   }
