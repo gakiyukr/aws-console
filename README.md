@@ -93,6 +93,32 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 與選填 Session Token 會在 Worker 內加密後寫入 D1；API 與頁面只會顯示 Access Key
 尾四位。請勿將 `CREDENTIAL_ENCRYPTION_KEY` 放入 D1，否則密文失去隔離意義。
 
+### AWS IAM 權限建議
+
+僅使用機器總覽（電源管理）時，IAM 政策可限縮為：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeImages",
+        "ec2:StartInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Wavelength 初始化與部署流程另需 VPC、Subnet、Carrier Gateway、Route Table、
+Security Group 與 `ec2:RunInstances` 等權限；一般 EC2 部署亦需 `ec2:RunInstances`。
+
+
 `0002_seed_legacy_machine.sql` 會以 `INSERT OR IGNORE` 將舊版
 `ec2-power-console` 的 `SEA-1` 管理目標移入 D1；既有資料不會被覆寫或重複建立。
 `0003_accounts_and_users.sql` 會建立 AWS 帳號與主控台使用者資料表，並為機器及
