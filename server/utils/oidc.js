@@ -277,14 +277,16 @@ export async function startLogin(env, redirectUri, setupInput = null) {
   );
   return {
     redirectUrl: url.href,
+    // SameSite 必須是 Lax：IdP 回 callback 是跨站頂層導航，Strict 的
+    // cookie 瀏覽器不會隨該請求送回，callback 將永遠讀不到 state。
     stateCookie:
-      `${STATE_COOKIE}=${encodeURIComponent(stateValue)}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=${STATE_MAX_AGE_S}`,
+      `${STATE_COOKIE}=${encodeURIComponent(stateValue)}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${STATE_MAX_AGE_S}`,
   };
 }
 
 /** 清除 state cookie 的 Set-Cookie 標頭。 */
 export function buildClearedStateCookie() {
-  return `${STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`;
+  return `${STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`;
 }
 
 /**

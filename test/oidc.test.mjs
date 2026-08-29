@@ -369,6 +369,8 @@ describe("startLogin", () => {
     assert.ok(stateCookie.startsWith("oidc_state="));
     assert.ok(stateCookie.includes("HttpOnly"));
     assert.ok(stateCookie.includes("Max-Age=600"));
+    // IdP 回 callback 是跨站頂層導航，state cookie 必須是 Lax 才會被帶回
+    assert.ok(stateCookie.includes("SameSite=Lax"));
   });
 
   it("三端點齊備時不進行 discovery，直接使用明確端點", async () => {
