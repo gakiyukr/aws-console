@@ -97,10 +97,12 @@ async function performAction(machine: MachineRow, action: 'start' | 'stop') {
 }
 
 const stopTarget = ref<MachineRow | null>(null)
+const stopOpen = ref(false)
 
 function requestPowerAction(machine: MachineRow, action: 'start' | 'stop') {
   if (action === 'stop') {
     stopTarget.value = machine
+    stopOpen.value = true
     return
   }
   return performAction(machine, action)
@@ -108,6 +110,7 @@ function requestPowerAction(machine: MachineRow, action: 'start' | 'stop') {
 
 async function confirmStop() {
   const machine = stopTarget.value
+  stopOpen.value = false
   stopTarget.value = null
   if (machine)
     await performAction(machine, 'stop')
@@ -222,17 +225,27 @@ async function submitAdd() {
   }
 }
 
-// 移除機器
+// 移除機器：目標與對話框開關分離——AlertDialogAction 會先發出
+// update:open(false)，若以 target 本身當開關，submitRemove 讀到的
+// 會是被清空的 null 而靜默失敗。
 const removeTarget = ref<MachineRow | null>(null)
+const removeOpen = ref(false)
 const removing = ref(false)
 
+function requestRemove(machine: MachineRow) {
+  removeTarget.value = machine
+  removeOpen.value = true
+}
+
 async function submitRemove() {
-  if (!removeTarget.value || removing.value)
+  const target = removeTarget.value
+  if (!target || removing.value)
     return
   removing.value = true
   try {
-    await $fetch(`/api/machines/${removeTarget.value.id}`, { method: 'DELETE' })
+    await $fetch(`/api/machines/${target.id}`, { method: 'DELETE' })
     toast.success('機器已從清單移除')
+    removeOpen.value = false
     removeTarget.value = null
     await loadMachines()
   }
@@ -437,7 +450,7 @@ onMounted(loadMachines)
                     size="sm"
                     class="text-destructive hover:text-destructive"
                     :disabled="actionPendingId === machine.id"
-                    @click="removeTarget = machine"
+                    @click="requestRemove(machine)"
                   >
                     移除
                   </Button>
@@ -533,7 +546,7 @@ onMounted(loadMachines)
       </DialogContent>
     </Dialog>
 
-    <AlertDialog :open="stopTarget !== null" @update:open="stopTarget = $event ? stopTarget : null">
+    <AlertDialog :open="stopOpen" @update:open="stopOpen = $event">
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>確認關閉機器</AlertDialogTitle>
@@ -542,7 +555,7 @@ onMounted(loadMachines)
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel @click="stopTarget = null">
+          <AlertDialogCancel @click="stopOpen = false">
             取消
           </AlertDialogCancel>
           <AlertDialogAction @click="confirmStop">
@@ -552,7 +565,7 @@ onMounted(loadMachines)
       </AlertDialogContent>
     </AlertDialog>
 
-    <AlertDialog :open="removeTarget !== null" @update:open="removeTarget = $event ? removeTarget : null">
+    <AlertDialog :open="removeOpen" @update:open="removeOpen = $event">
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>確認移除機器</AlertDialogTitle>
@@ -561,7 +574,7 @@ onMounted(loadMachines)
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel :disabled="removing" @click="removeTarget = null">
+          <AlertDialogCancel :disabled="removing" @click="removeOpen = false">
             取消
           </AlertDialogCancel>
           <AlertDialogAction
