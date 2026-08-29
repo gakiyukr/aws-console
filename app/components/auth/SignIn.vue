@@ -14,13 +14,20 @@ const ERROR_MESSAGES: Record<string, string> = {
   verification_failed: '登入驗證失敗，請再試一次。',
 }
 
-const errorMessage = computed(() => {
-  const code = typeof route.query.error === 'string' ? route.query.error : ''
-  return code ? (ERROR_MESSAGES[code] || '登入失敗，請再試一次。') : ''
-})
-
+// callback 的錯誤訊息只顯示一次：讀取後立即清掉 URL 上的 error 參數，
+// 避免重新整理一直殘留舊錯誤。
+const errorMessage = ref('')
 // 尚未完成 SSO 設定時，提供前往 OOBE 初始設定的入口
-const needsSetup = computed(() => route.query.error === 'configuration')
+const needsSetup = ref(false)
+
+onMounted(() => {
+  const code = typeof route.query.error === 'string' ? route.query.error : ''
+  if (code) {
+    errorMessage.value = ERROR_MESSAGES[code] || '登入失敗，請再試一次。'
+    needsSetup.value = code === 'configuration'
+    navigateTo({ path: '/login' }, { replace: true })
+  }
+})
 
 function startLogin() {
   if (isRedirecting.value)

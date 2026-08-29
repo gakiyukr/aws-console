@@ -48,9 +48,16 @@ const CALLBACK_ERRORS: Record<string, string> = {
   configuration: '設定內容無效，請檢查後再試。',
 }
 
-const callbackError = computed(() => {
+// callback 的錯誤訊息只顯示一次：讀取後立即以 replace 清掉 URL 上的
+// error 參數，避免重新整理或之後的操作一直殘留舊錯誤。
+const callbackError = ref('')
+
+onMounted(() => {
   const code = typeof route.query.error === 'string' ? route.query.error : ''
-  return code ? (CALLBACK_ERRORS[code] || '設定失敗，請再試一次。') : ''
+  if (code) {
+    callbackError.value = CALLBACK_ERRORS[code] || '設定失敗，請再試一次。'
+    navigateTo({ path: '/setup' }, { replace: true })
+  }
 })
 
 const canSubmit = computed(() =>
