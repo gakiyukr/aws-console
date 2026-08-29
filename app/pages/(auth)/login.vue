@@ -1,8 +1,6 @@
 <script setup lang="ts">
 definePageMeta({
   layout: 'blank',
-  // 已登入者不需再看到登入頁
-  middleware: ['guest'],
 })
 
 useSeoMeta({

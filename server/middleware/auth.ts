@@ -1,8 +1,9 @@
-// Nitro 伺服器中介層：/api/** 認證守衛。
-// 放行清單：SSO 登入流程（/api/auth/login、/api/auth/callback）與
-// session 查詢（供前端判斷導向）及 Nuxt 唯讀圖示端點。其餘 /api/**
-// 一律要求有效 session，且 session 內 email 必須在 OIDC 允許清單中，
-// 否則回 401 JSON。頁面路由交由前端中介層導向 /login。
+// Nitro 伺服器中介層：/api/** 認證守衛 + 頁面路由的 SSR 重導。
+// - /api/**：放行 SSO 登入流程與 session 查詢；其餘一律要求有效
+//   session（401 JSON）。
+// - 頁面：受保護頁面未登入時 302 到 /login，已登入者造訪 /login
+//   導回主控台。頁面守衛直接驗 cookie，不經內部子請求——Workers
+//   免費方案 CPU 限制緊，SSR 內再打 /api/session 會超出限制。
 import { getSessionFromRequest, parseSessionValue } from "../utils/auth.js";
 import { isAllowedEmail, isOidcConfigured } from "../utils/oidc.js";
 
@@ -13,36 +14,63 @@ const PUBLIC_API_PATHS = new Set([
   "/api/session",
 ]);
 
+// 受保護頁面（新增頁面時同步維護）；其餘非 /api 路徑視為靜態資源放行
+const PROTECTED_PAGE_PATHS = new Set(["/", "/ec2", "/wavelength", "/logs", "/accounts"]);
+// 公開頁面：登入頁與示範用錯誤頁
+const PUBLIC_PAGE_PATHS = new Set(["/login", "/401", "/403", "/404", "/500", "/503"]);
+
 export default defineEventHandler(async (event) => {
   const path = event.path.split("?")[0];
 
-  if (
-    !path.startsWith("/api/")
-    || PUBLIC_API_PATHS.has(path)
-    || path.startsWith("/api/_nuxt_icon/")
-  ) {
+  if (path.startsWith("/api/")) {
+    if (PUBLIC_API_PATHS.has(path) || path.startsWith("/api/_nuxt_icon/")) {
+      return;
+    }
+
+    const env = event.context.cloudflare?.env;
+    const secret = env?.SESSION_SECRET;
+
+    // 未設定 secrets 或 OIDC 時直接拒絕，fail closed
+    if (!secret || !isOidcConfigured(env)) {
+      throw createError({
+        statusCode: 503,
+        message: "伺服器尚未完成認證設定",
+      });
+    }
+
+    const session = getSessionFromRequest(event.node.req);
+    const payload = session ? await parseSessionValue(session, secret) : null;
+    if (!payload?.email || !isAllowedEmail(env, payload.email)) {
+      // createError 中斷後續處理；data.error 維持統一錯誤格式
+      throw createError({
+        statusCode: 401,
+        message: "未登入或 session 已失效",
+        data: { error: "未登入或 session 已失效" },
+      });
+    }
+    return;
+  }
+
+  // ── 頁面路由守衛 ──
+  const isProtectedPage = PROTECTED_PAGE_PATHS.has(path);
+  const isLoginPage = path === "/login";
+  if (!isProtectedPage && !isLoginPage && !PUBLIC_PAGE_PATHS.has(path)) {
     return;
   }
 
   const env = event.context.cloudflare?.env;
   const secret = env?.SESSION_SECRET;
-
-  // 未設定 secrets 或 OIDC 時直接拒絕，fail closed
-  if (!secret || !isOidcConfigured(env)) {
-    throw createError({
-      statusCode: 503,
-      message: "伺服器尚未完成認證設定",
-    });
-  }
-
-  const session = getSessionFromRequest(event.node.req);
+  const session = secret ? getSessionFromRequest(event.node.req) : null;
   const payload = session ? await parseSessionValue(session, secret) : null;
-  if (!payload?.email || !isAllowedEmail(env, payload.email)) {
-    // createError 中斷後續處理；data.error 維持統一錯誤格式
-    throw createError({
-      statusCode: 401,
-      message: "未登入或 session 已失效",
-      data: { error: "未登入或 session 已失效" },
-    });
+  const authenticated = Boolean(secret && payload?.email && isAllowedEmail(env, payload.email));
+
+  if (isLoginPage) {
+    if (authenticated) {
+      return sendRedirect(event, "/", 302);
+    }
+    return;
+  }
+  if (isProtectedPage && !authenticated) {
+    return sendRedirect(event, "/login", 302);
   }
 });
