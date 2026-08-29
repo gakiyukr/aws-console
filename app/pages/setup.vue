@@ -57,6 +57,14 @@ const canSubmit = computed(() =>
   form.email && form.clientId && form.clientSecret && (form.issuer || (form.authorizationUrl && form.tokenUrl && form.jwksUrl)),
 )
 
+// 「開始 SSO 驗證」需先通過測試連線；表單任何欄位變更後即失效，須重測
+const testedOk = ref(false)
+
+watch(form, () => {
+  testedOk.value = false
+  testResult.value = null
+})
+
 async function testConnection() {
   if (testing.value)
     return
@@ -70,9 +78,11 @@ async function testConnection() {
     testResult.value = result.ok
       ? { ok: true, message: `連線成功，IdP：${result.issuer}` }
       : { ok: false, message: result.error || '連線失敗' }
+    testedOk.value = result.ok
   }
   catch (error: any) {
     testResult.value = { ok: false, message: error?.data?.error || '連線失敗' }
+    testedOk.value = false
   }
   finally {
     testing.value = false
@@ -80,7 +90,7 @@ async function testConnection() {
 }
 
 async function startVerification() {
-  if (starting.value || !canSubmit.value)
+  if (starting.value || !testedOk.value)
     return
   starting.value = true
   try {
@@ -175,7 +185,8 @@ async function startVerification() {
             <PasswordInput
               id="setup-client-secret"
               v-model="form.clientSecret"
-              autocomplete="off"
+              placeholder="IdP 提供的 Client Secret"
+              autocomplete="new-password"
               :disabled="starting"
             />
           </div>
@@ -197,13 +208,17 @@ async function startVerification() {
               <PlugZap v-else class="mr-2 h-4 w-4" />
               測試連線
             </Button>
-            <Button :disabled="testing || starting || !canSubmit" @click="startVerification">
+            <Button
+              :disabled="testing || starting || !testedOk"
+              :title="testedOk ? undefined : '請先通過測試連線'"
+              @click="startVerification"
+            >
               <Loader2 v-if="starting" class="mr-2 h-4 w-4 animate-spin" />
               <ShieldCheck v-else class="mr-2 h-4 w-4" />
               開始 SSO 驗證
             </Button>
             <p class="text-xs text-muted-foreground">
-              將導向 IdP 完成一次登入；回頭的 email 與綁定 email 一致時設定才會生效。
+              需先通過測試連線；將導向 IdP 完成一次登入，回頭的 email 與綁定 email 一致時設定才會生效。
             </p>
           </div>
         </div>
