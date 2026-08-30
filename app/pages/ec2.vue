@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import type { SshPublicKeyOption } from '~/lib/ssh-keys'
 import { Check, Clipboard, Download, Loader2, RefreshCw, Server, Trash2 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { regionLabel } from '~/lib/regions'
+import { sshKeyTypeLabel } from '~/lib/ssh-keys'
 
 useSeoMeta({ title: 'EC2 部署 - AWS 主控台' })
 
@@ -32,19 +34,27 @@ const form = reactive({
   region: '',
   vpcId: '',
   os: '',
+  credentialType: 'ssh_key' as 'ssh_key' | 'password',
+  sshKeyId: null as number | null,
+  rootPassword: '',
 })
+const sshKeys = ref<SshPublicKeyOption[]>([])
+const loadingKeys = ref(false)
 const loadingInitial = ref(true)
 const loadingVpcs = ref(false)
 const busy = ref(false)
 const result = ref<Record<string, unknown> | null>(null)
 const progress = ref<ProgressEntry[]>([])
-const canDeploy = computed(() => form.accountId && form.region && form.vpcId && form.os)
+// 登入憑證為部署必填：公鑰模式需選擇一把，密碼模式需達後端要求的 8 字元下限
+const credentialReady = computed(() =>
+  form.credentialType === 'ssh_key' ? Boolean(form.sshKeyId) : form.rootPassword.length >= 8 && form.rootPassword.length <= 128)
+const canDeploy = computed(() => form.accountId && form.region && form.vpcId && form.os && credentialReady.value)
 const resultText = computed(() => result.value ? JSON.stringify(result.value, null, 2) : '')
 
 const stageLabels: Record<string, string> = {
   validating: '開始驗證部署輸入',
   resources_ready: '網路資源已就緒',
-  root_password_generated: 'root 密碼已產生',
+  credentials_ready: '登入憑證已套用',
   instance_launched: 'EC2 執行個體已啟動',
   waiting_for_running: '等待執行個體進入 running',
   instance_running: '執行個體已進入 running',
@@ -67,6 +77,30 @@ function appendProgress(message: string, details?: Record<string, unknown>) {
     message,
     ...(details ? { details } : {}),
   })
+}
+
+// 載入 D1 公鑰庫供憑證下拉選擇；既有選擇失效時回落到第一把
+async function loadSshKeys() {
+  loadingKeys.value = true
+  try {
+    const payload = await $fetch<{ keys: SshPublicKeyOption[] }>('/api/ssh-keys')
+    sshKeys.value = payload.keys
+    if (!form.sshKeyId || !sshKeys.value.some(key => key.id === form.sshKeyId))
+      form.sshKeyId = sshKeys.value[0]?.id || null
+  }
+  catch (error) {
+    toast.error(errorMessage(error, '載入 SSH 公鑰失敗'))
+  }
+  finally {
+    loadingKeys.value = false
+  }
+}
+
+// 部署請求的憑證欄位：公鑰模式帶 D1 列 id，密碼模式帶本次輸入的明碼
+function credentialPayload() {
+  return form.credentialType === 'ssh_key'
+    ? { credential_type: 'ssh_key', ssh_key_id: form.sshKeyId }
+    : { credential_type: 'password', root_password: form.rootPassword }
 }
 
 async function loadRegions(accountId: number) {
@@ -190,6 +224,7 @@ async function deployEc2() {
         region: form.region,
         vpc_id: form.vpcId,
         os: form.os,
+        ...credentialPayload(),
       }),
     })
     result.value = await readEventStream(response)
@@ -225,13 +260,18 @@ function downloadResult() {
   URL.revokeObjectURL(url)
 }
 
+function reloadOptions() {
+  loadInitialOptions()
+  loadSshKeys()
+}
+
 watch(() => form.accountId, async (accountId, previous) => {
   if (!accountId || accountId === previous)
     return
   await loadRegions(accountId)
 })
 watch(() => form.region, loadVpcs)
-onMounted(loadInitialOptions)
+onMounted(reloadOptions)
 </script>
 
 <template>
@@ -245,7 +285,7 @@ onMounted(loadInitialOptions)
           在一般 AWS Region 建立可從公網連線的 EC2 執行個體
         </p>
       </div>
-      <Button variant="outline" size="sm" :disabled="loadingInitial || busy" @click="loadInitialOptions">
+      <Button variant="outline" size="sm" :disabled="loadingInitial || busy" @click="reloadOptions">
         <Loader2 v-if="loadingInitial" class="mr-2 h-4 w-4 animate-spin" />
         <RefreshCw v-else class="mr-2 h-4 w-4" />
         重新載入選項
@@ -260,50 +300,93 @@ onMounted(loadInitialOptions)
         </CardTitle>
         <CardDescription>一般 EC2 固定使用 t3.nano，部署後會自動加入機器總覽</CardDescription>
       </CardHeader>
-      <CardContent class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <div class="grid gap-2">
-          <Label for="ec2-account">AWS 帳號</Label>
-          <select id="ec2-account" v-model.number="form.accountId" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="loadingInitial || busy">
-            <option :value="null" disabled>
-              請選擇 AWS 帳號
-            </option>
-            <option v-for="account in accounts" :key="account.id" :value="account.id">
-              {{ account.name }}{{ account.isDefault ? '（預設）' : '' }}
-            </option>
-          </select>
+      <CardContent class="grid gap-4">
+        <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div class="grid gap-2">
+            <Label for="ec2-account">AWS 帳號</Label>
+            <select id="ec2-account" v-model.number="form.accountId" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="loadingInitial || busy">
+              <option :value="null" disabled>
+                請選擇 AWS 帳號
+              </option>
+              <option v-for="account in accounts" :key="account.id" :value="account.id">
+                {{ account.name }}{{ account.isDefault ? '（預設）' : '' }}
+              </option>
+            </select>
+          </div>
+          <div class="grid gap-2">
+            <Label for="ec2-region">Region</Label>
+            <select id="ec2-region" v-model="form.region" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="!form.accountId || loadingInitial || busy">
+              <option value="">
+                請選擇 Region
+              </option>
+              <option v-for="region in regions" :key="region" :value="region">
+                {{ regionLabel(region) }}
+              </option>
+            </select>
+          </div>
+          <div class="grid gap-2">
+            <Label for="ec2-vpc">VPC</Label>
+            <select id="ec2-vpc" v-model="form.vpcId" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="!form.region || loadingVpcs || busy">
+              <option value="">
+                {{ loadingVpcs ? '載入中...' : '請選擇 VPC' }}
+              </option>
+              <option v-for="vpc in vpcs" :key="vpc.value" :value="vpc.value">
+                {{ vpc.label }}
+              </option>
+            </select>
+          </div>
+          <div class="grid gap-2">
+            <Label for="ec2-os">作業系統</Label>
+            <select id="ec2-os" v-model="form.os" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="loadingInitial || busy">
+              <option value="">
+                請選擇作業系統
+              </option>
+              <option v-for="option in osOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </div>
         </div>
-        <div class="grid gap-2">
-          <Label for="ec2-region">Region</Label>
-          <select id="ec2-region" v-model="form.region" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="!form.accountId || loadingInitial || busy">
-            <option value="">
-              請選擇 Region
-            </option>
-            <option v-for="region in regions" :key="region" :value="region">
-              {{ regionLabel(region) }}
-            </option>
-          </select>
-        </div>
-        <div class="grid gap-2">
-          <Label for="ec2-vpc">VPC</Label>
-          <select id="ec2-vpc" v-model="form.vpcId" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="!form.region || loadingVpcs || busy">
-            <option value="">
-              {{ loadingVpcs ? '載入中...' : '請選擇 VPC' }}
-            </option>
-            <option v-for="vpc in vpcs" :key="vpc.value" :value="vpc.value">
-              {{ vpc.label }}
-            </option>
-          </select>
-        </div>
-        <div class="grid gap-2">
-          <Label for="ec2-os">作業系統</Label>
-          <select id="ec2-os" v-model="form.os" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="loadingInitial || busy">
-            <option value="">
-              請選擇作業系統
-            </option>
-            <option v-for="option in osOptions" :key="option.value" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
+
+        <!-- 登入憑證：公鑰取自 D1 公鑰庫，密碼僅存在於本次請求 -->
+        <div class="grid gap-4 rounded-md border p-4 md:grid-cols-2">
+          <div class="grid content-start gap-2">
+            <Label for="ec2-credential-type">登入憑證</Label>
+            <select id="ec2-credential-type" v-model="form.credentialType" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="busy">
+              <option value="ssh_key">
+                SSH 公鑰
+              </option>
+              <option value="password">
+                自訂密碼
+              </option>
+            </select>
+            <p class="text-xs text-muted-foreground">
+              公鑰登入會停用 root 密碼認證；自訂密碼不會被儲存，部署後請自行妥善保管。
+            </p>
+          </div>
+          <div v-if="form.credentialType === 'ssh_key'" class="grid content-start gap-2">
+            <Label for="ec2-ssh-key">SSH 公鑰</Label>
+            <select id="ec2-ssh-key" v-model.number="form.sshKeyId" class="h-9 rounded-md border bg-background px-3 text-sm" :disabled="loadingKeys || busy">
+              <option :value="null" disabled>
+                {{ loadingKeys ? '載入中...' : '請選擇公鑰' }}
+              </option>
+              <option v-for="key in sshKeys" :key="key.id" :value="key.id">
+                {{ key.label }}（{{ sshKeyTypeLabel(key.publicKey) }}）
+              </option>
+            </select>
+            <p v-if="!loadingKeys && !sshKeys.length" class="text-xs text-amber-600">
+              尚無公鑰，請先到 <NuxtLink to="/settings" class="underline underline-offset-2">
+                設定頁
+              </NuxtLink> 新增，或改用自訂密碼。
+            </p>
+          </div>
+          <div v-else class="grid content-start gap-2">
+            <Label for="ec2-root-password">root 密碼</Label>
+            <PasswordInput id="ec2-root-password" v-model="form.rootPassword" autocomplete="new-password" placeholder="8–128 字元" :disabled="busy" />
+            <p class="text-xs text-muted-foreground">
+              密碼僅用於本次部署，不會寫入資料庫或日誌。
+            </p>
+          </div>
         </div>
       </CardContent>
       <CardFooter class="justify-end border-t pt-4">
@@ -351,7 +434,7 @@ onMounted(loadInitialOptions)
             <CardTitle class="text-base">
               部署結果
             </CardTitle>
-            <CardDescription>包含 EC2 連線資訊與 root 密碼，請妥善保存</CardDescription>
+            <CardDescription>包含 EC2 連線資訊，請妥善保存連線憑證</CardDescription>
           </div>
           <div class="flex gap-1">
             <Button variant="ghost" size="icon" title="複製結果" :disabled="!result" @click="copyResult">

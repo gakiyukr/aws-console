@@ -18,7 +18,7 @@ const PUBLIC_API_PATHS = new Set([
 ]);
 
 // 受保護頁面（新增頁面時同步維護）；其餘非 /api 路徑視為靜態資源放行
-const PROTECTED_PAGE_PATHS = new Set(["/", "/ec2", "/wavelength", "/logs", "/accounts"]);
+const PROTECTED_PAGE_PATHS = new Set(["/", "/ec2", "/wavelength", "/logs", "/accounts", "/settings"]);
 // 公開頁面：登入頁、OOBE 設定頁與示範用錯誤頁
 const PUBLIC_PAGE_PATHS = new Set(["/login", "/setup", "/401", "/403", "/404", "/500", "/503"]);
 

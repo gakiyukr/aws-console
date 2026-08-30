@@ -6,11 +6,15 @@ import {
   appendOperationLog,
   createAwsAccount,
   createMachine,
+  createSshPublicKey,
   deleteAwsAccount,
   deleteMachine,
+  deleteSshPublicKey,
   getMachineById,
+  getSshPublicKeyById,
   listMachines,
   listOperationLogs,
+  listSshPublicKeys,
 } from "../server/utils/db.js";
 import { createDb } from "./d1-stub.js";
 
@@ -55,6 +59,43 @@ describe("machines CRUD", () => {
     assert.equal(await deleteMachine(db, id), true);
     assert.equal(await deleteMachine(db, id), false);
     assert.equal(await getMachineById(db, id), null);
+  });
+});
+
+describe("ssh_public_keys CRUD", () => {
+  const KEY_A = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Q2OmB3ZPG1P7jZu9mJcOZ a@host";
+  const KEY_B = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ b@host";
+
+  it("新增後可列出並以 id 取得", async () => {
+    const db = createDb();
+    const created = await createSshPublicKey(db, { label: "MacBook", publicKey: KEY_A });
+    assert.ok(created.id > 0);
+    await createSshPublicKey(db, { label: "Server", publicKey: KEY_B });
+
+    const keys = await listSshPublicKeys(db);
+    assert.equal(keys.length, 2);
+    assert.equal(keys[0].label, "MacBook"); // 依 id 遞增排序
+    assert.equal(keys[0].publicKey, KEY_A);
+    assert.ok(keys[0].createdAt);
+
+    const fetched = await getSshPublicKeyById(db, created.id);
+    assert.equal(fetched.label, "MacBook");
+  });
+
+  it("同一公鑰重複新增回 null", async () => {
+    const db = createDb();
+    await createSshPublicKey(db, { label: "A", publicKey: KEY_A });
+    const duplicate = await createSshPublicKey(db, { label: "B", publicKey: KEY_A });
+    assert.equal(duplicate, null);
+    assert.equal((await listSshPublicKeys(db)).length, 1);
+  });
+
+  it("deleteSshPublicKey 移除存在的記錄回 true，不存在回 false", async () => {
+    const db = createDb();
+    const { id } = await createSshPublicKey(db, { label: "A", publicKey: KEY_A });
+    assert.equal(await deleteSshPublicKey(db, id), true);
+    assert.equal(await deleteSshPublicKey(db, id), false);
+    assert.equal(await getSshPublicKeyById(db, id), null);
   });
 });
 

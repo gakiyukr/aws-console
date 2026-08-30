@@ -31,6 +31,11 @@ export const navMenu: NavMenu[] = [
         icon: 'i-lucide-key-round',
         link: '/accounts',
       },
+      {
+        title: '設定',
+        icon: 'i-lucide-settings',
+        link: '/settings',
+      },
     ],
   },
 ]

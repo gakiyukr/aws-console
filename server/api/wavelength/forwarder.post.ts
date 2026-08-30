@@ -3,6 +3,7 @@
 // 事件序列與 deploy 相同：progress… → result|error；
 // 操作日誌 action: deploy_forwarder。
 import { appendOperationLog } from "../../utils/db.js";
+import { resolveRequestCredential } from "../../utils/deploy-credential.js";
 import { registerDeploymentMachines } from "../../utils/deployment-registration.js";
 import { summarizeDeployResult } from "../../utils/deploy-log.js";
 import { errorResponse, jsonResponse, readJsonBody, sseResponse } from "../../utils/http.js";
@@ -39,6 +40,11 @@ export default defineEventHandler(async (event) => {
   if (!osValidation.valid) {
     return errorResponse(400, osValidation.error);
   }
+  const credentialResolution = await resolveRequestCredential(env.DB, body);
+  if (credentialResolution.error) {
+    return errorResponse(400, credentialResolution.error);
+  }
+  body.credential = credentialResolution.credential;
   let accountContext;
   try {
     accountContext = await resolveAwsAccount(env, body.account_id);

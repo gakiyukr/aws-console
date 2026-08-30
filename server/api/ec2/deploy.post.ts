@@ -1,6 +1,7 @@
 // POST /api/ec2/deploy：以 SSE 串流部署一般區域 EC2。
 import { resolveAwsAccount } from "../../utils/aws-account.js";
 import { appendOperationLog } from "../../utils/db.js";
+import { resolveRequestCredential } from "../../utils/deploy-credential.js";
 import { registerDeploymentMachines } from "../../utils/deployment-registration.js";
 import { summarizeDeployResult } from "../../utils/deploy-log.js";
 import { errorResponse, jsonResponse, readJsonBody, sseResponse } from "../../utils/http.js";
@@ -22,6 +23,10 @@ export default defineEventHandler(async (event) => {
     if (!validation.valid)
       return errorResponse(400, validation.error);
   }
+  const credentialResolution = await resolveRequestCredential(env.DB, body);
+  if (credentialResolution.error)
+    return errorResponse(400, credentialResolution.error);
+  body.credential = credentialResolution.credential;
 
   let accountContext;
   try {

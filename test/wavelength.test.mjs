@@ -11,13 +11,14 @@ import {
   deployForwarderForExistingWavelengthInstance,
   deployRegionalEc2Instance,
   deployWavelengthInstance,
-  generateRootPassword,
   initializeWavelengthZone,
   listEc2Regions,
   listExistingWavelengthInstances,
   listWavelengthInstanceTypes,
   listWavelengthOsOptions,
   listWavelengthRegions,
+  resolveDeployCredential,
+  validateSshPublicKeyText,
 } from "../server/utils/wavelength.js";
 
 // ── 測試輔助 ────────────────────────────────────────────────
@@ -44,37 +45,127 @@ function makeXmlResponse(xml, status = 200) {
 
 // ── 純函式 ──────────────────────────────────────────────────
 
-describe("generateRootPassword", () => {
-  it("產生含大小寫、數字與符號的強密碼", () => {
-    const password = generateRootPassword();
+describe("validateSshPublicKeyText", () => {
+  const VALID_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Q2OmB3ZPG1P7jZu9mJcOZ test@host";
 
-    assert.ok(password.length >= 24);
-    assert.match(password, /[A-Z]/);
-    assert.match(password, /[a-z]/);
-    assert.match(password, /\d/);
-    assert.match(password, /[^A-Za-z0-9]/);
+  it("接受單行公鑰並回傳 trim 後陣列", () => {
+    const keys = validateSshPublicKeyText(`  ${VALID_KEY}  \n`);
+    assert.deepEqual(keys, [VALID_KEY]);
+  });
+
+  it("接受多行公鑰與尾端備註", () => {
+    const keys = validateSshPublicKeyText(`${VALID_KEY}\nssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ key@host`);
+    assert.equal(keys.length, 2);
+    assert.equal(keys[1], "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ key@host");
+  });
+
+  it("拒絕空輸入", () => {
+    assert.throws(() => validateSshPublicKeyText("   \n"), /SSH 公鑰不能為空/);
+  });
+
+  it("拒絕超過 10 行", () => {
+    const text = Array.from({ length: 11 }, () => VALID_KEY).join("\n");
+    assert.throws(() => validateSshPublicKeyText(text), /SSH 公鑰最多 10 把/);
+  });
+
+  it("拒絕格式無效的行並指出行號", () => {
+    assert.throws(
+      () => validateSshPublicKeyText(`${VALID_KEY}\nnot-a-valid-key`),
+      /SSH 公鑰格式無效：第 2 行/,
+    );
+  });
+
+  it("拒絕帶 options 前綴的金鑰", () => {
+    assert.throws(
+      () => validateSshPublicKeyText(`no-pty ${VALID_KEY}`),
+      /SSH 公鑰格式無效：第 1 行/,
+    );
+  });
+
+  it("拒絕總長度超過 8192 字元", () => {
+    const padding = "a".repeat(8200);
+    assert.throws(() => validateSshPublicKeyText(padding), /SSH 公鑰總長度不可超過 8192 字元/);
+  });
+});
+
+describe("resolveDeployCredential", () => {
+  it("缺少 credential 時拋錯", () => {
+    assert.throws(() => resolveDeployCredential({}), /缺少登入憑證/);
+  });
+
+  it("密碼模式回傳原值", () => {
+    const credential = resolveDeployCredential({ credential: { type: "password", password: "Abcd1234!Abcd1234!" } });
+    assert.deepEqual(credential, { type: "password", password: "Abcd1234!Abcd1234!" });
+  });
+
+  it("拒絕長度不足或過長的密碼", () => {
+    assert.throws(
+      () => resolveDeployCredential({ credential: { type: "password", password: "short" } }),
+      /root 密碼長度必須為 8 到 128 字元/,
+    );
+    assert.throws(
+      () => resolveDeployCredential({ credential: { type: "password", password: "a".repeat(129) } }),
+      /root 密碼長度必須為 8 到 128 字元/,
+    );
+  });
+
+  it("公鑰模式驗證並正規化金鑰", () => {
+    const credential = resolveDeployCredential({
+      credential: { type: "ssh_key", keys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Q2OmB3ZPG1P7jZu9mJcOZ test@host"] },
+    });
+    assert.equal(credential.type, "ssh_key");
+    assert.equal(credential.keys.length, 1);
+  });
+
+  it("公鑰內容無效時拋錯", () => {
+    assert.throws(
+      () => resolveDeployCredential({ credential: { type: "ssh_key", keys: ["bad-key"] } }),
+      /SSH 公鑰格式無效：第 1 行/,
+    );
+  });
+
+  it("拒絕未知憑證類型", () => {
+    assert.throws(
+      () => resolveDeployCredential({ credential: { type: "token", token: "x" } }),
+      /登入憑證類型無效，必須是 ssh_key 或 password/,
+    );
   });
 });
 
 describe("buildCloudInit", () => {
-  it("注入密碼與完成標記", () => {
-    const password = "Abcd1234!Abcd1234!Abcd1234!";
-    const cloudInit = buildCloudInit(password);
+  const PASSWORD = "Abcd1234!Abcd1234!Abcd1234!";
+
+  it("密碼模式：注入密碼與完成標記", () => {
+    const cloudInit = buildCloudInit({ type: "password", password: PASSWORD });
 
     assert.match(cloudInit, /ssh_pwauth: true/);
     assert.match(cloudInit, /PermitRootLogin yes/);
     assert.match(
       cloudInit,
-      new RegExp(`password: "${password.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`),
+      new RegExp(`password: "${PASSWORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`),
     );
     assert.match(cloudInit, new RegExp(WAVELENGTH_CLOUD_INIT_MARKER));
   });
 
-  it("對 YAML 敏感字元加引號跳脫", () => {
+  it("密碼模式：對 YAML 敏感字元加引號跳脫", () => {
     const password = String.raw`![]{}&*"quoted"\slash`;
-    const cloudInit = buildCloudInit(password);
+    const cloudInit = buildCloudInit({ type: "password", password });
 
     assert.ok(cloudInit.includes(String.raw`password: "![]{}&*\"quoted\"\\slash"`));
+  });
+
+  it("公鑰模式：寫入 authorized_keys 並停用密碼登入", () => {
+    const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Q2OmB3ZPG1P7jZu9mJcOZ test@host";
+    const cloudInit = buildCloudInit({ type: "ssh_key", keys: [key] });
+
+    assert.match(cloudInit, /ssh_pwauth: false/);
+    assert.match(cloudInit, /PermitRootLogin without-password/);
+    assert.match(cloudInit, /PasswordAuthentication no/);
+    assert.match(cloudInit, /path: \/root\/.ssh\/authorized_keys/);
+    assert.match(cloudInit, /permissions: "0600"/);
+    assert.ok(cloudInit.includes(`      ${key}`));
+    assert.doesNotMatch(cloudInit, /chpasswd/);
+    assert.match(cloudInit, new RegExp(WAVELENGTH_CLOUD_INIT_MARKER));
   });
 });
 
@@ -476,6 +567,7 @@ describe("deployForwarderForExistingWavelengthInstance", () => {
       vpc_id: "vpc-123",
       instance_id: "i-wl-existing",
       os: "debian12",
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     }, (stage, details = {}) => {
       progressEvents.push({ stage, ...details });
     });
@@ -492,14 +584,18 @@ describe("deployForwarderForExistingWavelengthInstance", () => {
     assert.equal(runParams.get("NetworkInterface.1.AssociatePublicIpAddress"), "true");
     assert.equal(runParams.get("NetworkInterface.1.AssociateCarrierIpAddress"), null);
     assert.match(userData, /--to-destination 10\.0\.100\.10:22/);
+    assert.match(userData, /ssh_pwauth: true/);
     assert.equal(result.target_instance_id, "i-wl-existing");
     assert.equal(result.target_private_ip, "10.0.100.10");
     assert.equal(result.forwarder.instance_id, "i-forwarder");
     assert.equal(result.forwarder.instance_type, "t3.nano");
+    assert.equal(result.forwarder.credential_type, "password");
+    // 進度事件不得攜帶機密：credentials_ready 僅公布憑證類型
     assert.equal(progressEvents.some((event) =>
-      event.stage === "root_password_generated" &&
+      event.stage === "credentials_ready" &&
       event.username === "root" &&
-      event.password === result.forwarder.password
+      event.credential_type === "password" &&
+      !("password" in event)
     ), true);
     assert.ok(calls.some((call) => readAction(call.init) === "ModifyInstanceAttribute"));
   });
@@ -759,6 +855,7 @@ describe("deployWavelengthInstance", () => {
       vpc_id: "vpc-123",
       instance_type: "t3.medium",
       os: "debian12",
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     });
 
     assert.equal(result.ready, true);
@@ -1413,6 +1510,7 @@ describe("deployWavelengthInstance", () => {
       vpc_id: "vpc-123",
       instance_type: "t3.medium",
       os: "debian12",
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     });
 
     const runInstancesCall = calls.find((call) => readAction(call.init) === "RunInstances");
@@ -1428,7 +1526,8 @@ describe("deployWavelengthInstance", () => {
     assert.equal(result.carrier_gateway_id, "cagw-123");
     assert.equal(result.route_table_id, "rtb-123");
     assert.equal(result.username, "root");
-    assert.match(result.password, /[A-Z]/);
+    assert.equal(result.credential_type, "password");
+    assert.equal(result.password, "Abcd1234!Abcd1234!");
     assert.equal(result.ssh_command, "ssh root@ec2-18-1-2-3.eu-west-2.compute.amazonaws.com");
     assert.deepEqual(sleepDelays, [5000, 5000, 5000]);
     assert.match(runInstancesBody, /AssociateCarrierIpAddress=true/);
@@ -1661,6 +1760,7 @@ describe("deployWavelengthInstance", () => {
       regional_instance_type: "t3.medium",
       os: "debian12",
       enable_forwarder: true,
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     });
 
     const runBodies = calls
@@ -1844,6 +1944,7 @@ describe("deployWavelengthInstance", () => {
       instance_type: "t3.medium",
       os: "debian12",
       enable_forwarder: true,
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     });
 
     const runBodies = calls
@@ -2063,6 +2164,7 @@ describe("deployWavelengthInstance", () => {
       vpc_id: "vpc-123",
       instance_type: "t3.medium",
       os: "debian13",
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     });
 
     assert.equal(result.instance_id, "i-123");
@@ -2236,6 +2338,7 @@ describe("deployWavelengthInstance", () => {
       vpc_id: "vpc-123",
       instance_type: "t3.medium",
       os: "debian12",
+      credential: { type: "password", password: "Abcd1234!Abcd1234!" },
     }, (stage, details = {}) => {
       progressEvents.push({ stage, ...details });
     });
@@ -2247,11 +2350,13 @@ describe("deployWavelengthInstance", () => {
     assert.equal(result.carrier_gateway_id, "cagw-123");
     assert.equal(result.route_table_id, "rtb-123");
     assert.equal(result.username, "root");
-    assert.match(result.password, /[A-Z]/);
+    assert.equal(result.credential_type, "password");
+    assert.equal(result.password, "Abcd1234!Abcd1234!");
     assert.equal(progressEvents.some((event) =>
-      event.stage === "root_password_generated" &&
+      event.stage === "credentials_ready" &&
       event.username === "root" &&
-      event.password === result.password
+      event.credential_type === "password" &&
+      !("password" in event)
     ), true);
     assert.equal(result.ssh_command, "");
     assert.match(result.warning, /已啟動/);
@@ -2481,6 +2586,10 @@ describe("deployRegionalEc2Instance", () => {
         vpc_id: "vpc-123",
         regional_instance_type: "t3.medium",
         os: "debian12",
+        credential: {
+          type: "ssh_key",
+          keys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Q2OmB3ZPG1P7jZu9mJcOZ test@host"],
+        },
       },
       (stage, details = {}) => {
         progressEvents.push({ stage, ...details });
@@ -2496,19 +2605,29 @@ describe("deployRegionalEc2Instance", () => {
     assert.equal(runParams.get("NetworkInterface.1.AssociatePublicIpAddress"), "true");
     assert.equal(runParams.get("NetworkInterface.1.SecurityGroupId.1"), "sg-123");
     assert.equal(runParams.get("NetworkInterface.1.AssociateCarrierIpAddress"), null);
-    assert.match(userData, /ssh_pwauth: true/);
-    assert.match(userData, /PermitRootLogin yes/);
+    // 公鑰模式：authorized_keys 寫入 root 公鑰並停用密碼登入
+    assert.match(userData, /ssh_pwauth: false/);
+    assert.match(userData, /PermitRootLogin without-password/);
+    assert.match(userData, /PasswordAuthentication no/);
+    assert.match(
+      userData,
+      /ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8Q2OmB3ZPG1P7jZu9mJcOZ test@host/,
+    );
+    assert.doesNotMatch(userData, /chpasswd/);
     assert.match(userData, new RegExp(WAVELENGTH_CLOUD_INIT_MARKER));
+    // 進度事件不得攜帶機密：credentials_ready 僅公布憑證類型
     assert.equal(progressEvents.some((event) =>
-      event.stage === "root_password_generated" &&
+      event.stage === "credentials_ready" &&
       event.username === "root" &&
-      event.password === result.password
+      event.credential_type === "ssh_key" &&
+      !("password" in event)
     ), true);
     assert.equal(result.instance_id, "i-regional");
     assert.equal(result.security_group_id, "sg-123");
     assert.equal(result.subnet_id, "subnet-regional");
     assert.equal(result.username, "root");
-    assert.match(result.password, /[A-Z]/);
+    assert.equal(result.credential_type, "ssh_key");
+    assert.equal(result.password, "");
     assert.equal(result.ssh_command, "ssh root@ec2-18-4-5-6.eu-west-2.compute.amazonaws.com");
     assert.ok(
       progressEvents.some(

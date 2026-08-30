@@ -142,6 +142,7 @@ Security Group 與 `ec2:RunInstances` 等權限；一般 EC2 部署亦需 `ec2:R
 操作日誌加入 AWS 帳號關聯。建立第一個 AWS 帳號時，尚未關聯的舊機器會自動歸入該帳號。
 `0004_drop_console_users.sql` 於改用 SSO 後移除密碼使用者與登入限流資料表。
 `0005_sso_config.sql` 建立 OOBE 初始設定的 SSO 設定表。
+`0006_ssh_public_keys.sql` 建立部署用的 SSH 公鑰庫資料表。
 
 完成 D1 與 secrets 設定後執行：
 
@@ -159,9 +160,24 @@ pnpm deploy
 - `/api/machines`：EC2 管理清單與即時狀態。
 - `/api/machines/:id/action`：白名單機器的開機或關機。
 - `/api/accounts`：AWS 帳號與加密憑證管理；`/:id/test` 可驗證憑證。
+- `/api/ssh-keys`：部署用 SSH 公鑰庫的列表、新增（上限 50 把）與刪除。
 - `/api/ec2/*`：一般 EC2 的 Region、VPC、執行個體、作業系統選項與部署流程。
 - `/api/wavelength/*`：Wavelength 探索、初始化與部署流程。
 - `/api/logs`：可依 `account_id`、`action`、`status`、`limit` 讀取稽核日誌。
 
 所有 `/api` 端點（SSO 登入流程與 session 查詢除外）都要求有效登入 session，
 且 session 內 email 必須在允許清單中。
+
+## 部署登入憑證
+
+三條部署流程（Wavelength EC2、Wavelength EC2 + forwarder、既有 WL 附加
+forwarder、一般區域 EC2）的 root 登入憑證為必填二選一，隨機密碼已移除：
+
+- `credential_type: "ssh_key"`：攜帶 `ssh_key_id`（D1 公鑰庫列 id），部署時寫入
+  `/root/.ssh/authorized_keys` 並停用 root 密碼認證（`PermitRootLogin
+  without-password`、`PasswordAuthentication no`）。公鑰於設定頁管理。
+- `credential_type: "password"`：攜帶 `root_password`（8–128 字元），沿用
+  chpasswd 設定 root 密碼。密碼僅存在於單次請求，不寫入 D1、不進稽核日誌。
+
+SSE 進度事件 `credentials_ready` 僅公布 `username` 與 `credential_type`，
+不攜帶任何機密；部署結果的 `password` 欄位在公鑰模式下為空字串。

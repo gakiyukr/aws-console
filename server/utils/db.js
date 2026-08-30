@@ -55,6 +55,55 @@ export async function deleteMachine(db, id) {
   return (result.meta.changes ?? 0) > 0;
 }
 
+// ─── SSH 公鑰庫 ─────────────────────────────────────────────
+
+/**
+ * 取得全部登入用 SSH 公鑰（依新增順序）。
+ * @param {D1Database} db
+ * @returns {Promise<Array<{id:number, label:string, publicKey:string, createdAt:string}>>}
+ */
+export async function listSshPublicKeys(db) {
+  const { results } = await db
+    .prepare("SELECT id, label, public_key AS publicKey, created_at AS createdAt FROM ssh_public_keys ORDER BY id")
+    .all();
+  return results;
+}
+
+/** 依主鍵取得單一公鑰；不存在回 null。部署流程解析 ssh_key_id 時使用。 */
+export async function getSshPublicKeyById(db, id) {
+  return await db
+    .prepare("SELECT id, label, public_key AS publicKey FROM ssh_public_keys WHERE id = ?1")
+    .bind(id)
+    .first() ?? null;
+}
+
+/**
+ * 新增公鑰；同一 public_key 重複時回 null 而非拋錯，
+ * 讓路由層能回應 409 語意而不需解析 SQLite 錯誤字串。
+ * @returns {Promise<{id:number}|null>} null 表示已存在
+ */
+export async function createSshPublicKey(db, { label, publicKey }) {
+  try {
+    const result = await db
+      .prepare("INSERT INTO ssh_public_keys (label, public_key) VALUES (?1, ?2)")
+      .bind(label, publicKey)
+      .run();
+    return { id: result.meta.last_row_id };
+  } catch (error) {
+    // D1 的 UNIQUE 衝突訊息含 "UNIQUE constraint failed"
+    if (String(error?.message || error).includes("UNIQUE")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** 移除公鑰；回傳是否確實刪除任一列。 */
+export async function deleteSshPublicKey(db, id) {
+  const result = await db.prepare("DELETE FROM ssh_public_keys WHERE id = ?1").bind(id).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
 // ─── 操作日誌 ───────────────────────────────────────────────
 
 /**

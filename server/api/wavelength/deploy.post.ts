@@ -3,6 +3,7 @@
 // sseResponse 已在 onStart 拋錯時自動轉為 error 事件，此處僅需
 // 於 result/error 時寫入操作日誌（action: deploy_wavelength）。
 import { appendOperationLog } from "../../utils/db.js";
+import { resolveRequestCredential } from "../../utils/deploy-credential.js";
 import { registerDeploymentMachines } from "../../utils/deployment-registration.js";
 import { summarizeDeployResult } from "../../utils/deploy-log.js";
 import { errorResponse, jsonResponse, readJsonBody, sseResponse } from "../../utils/http.js";
@@ -36,6 +37,11 @@ export default defineEventHandler(async (event) => {
   if (!osValidation.valid) {
     return errorResponse(400, osValidation.error);
   }
+  const credentialResolution = await resolveRequestCredential(env.DB, body);
+  if (credentialResolution.error) {
+    return errorResponse(400, credentialResolution.error);
+  }
+  body.credential = credentialResolution.credential;
   let accountContext;
   try {
     accountContext = await resolveAwsAccount(env, body.account_id);

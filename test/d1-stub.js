@@ -13,7 +13,7 @@ function makeResult(rows, meta = {}) {
 }
 
 // 具 AUTOINCREMENT 主鍵的表：INSERT 未提供 id 時自動補號
-const AUTO_ID_TABLES = new Set(["machines", "operation_log", "aws_accounts"]);
+const AUTO_ID_TABLES = new Set(["machines", "operation_log", "aws_accounts", "ssh_public_keys"]);
 
 export class D1Stub {
   constructor() {
@@ -197,6 +197,9 @@ export class D1Stub {
     if (table === "aws_accounts" && rows.some(r => r.name === row.name)) {
       throw new Error("UNIQUE constraint failed: aws_accounts.name");
     }
+    if (table === "ssh_public_keys" && rows.some(r => r.public_key === row.public_key)) {
+      throw new Error("UNIQUE constraint failed: ssh_public_keys.public_key");
+    }
     if (table === "aws_accounts") {
       Object.assign(row, {
         enabled: row.enabled ?? 1,
@@ -205,6 +208,10 @@ export class D1Stub {
         created_at: row.created_at ?? new Date().toISOString(),
         updated_at: row.updated_at ?? new Date().toISOString(),
       });
+    }
+    // 模擬 schema 的 DEFAULT (datetime('now'))：INSERT 未提供時間欄位時補值
+    if (table === "ssh_public_keys") {
+      row.created_at = row.created_at ?? new Date().toISOString().replace("T", " ").slice(0, 19);
     }
     if (AUTO_ID_TABLES.has(table) && row.id === undefined) {
       this.lastRowId += 1;
@@ -283,10 +290,10 @@ export class D1Stub {
   }
 }
 
-/** 建立已套用 0001–0005 schema（空表）的樁。 */
+/** 建立已套用 0001–0006 schema（空表）的樁。 */
 export function createDb() {
   const stub = new D1Stub();
-  for (const name of ["machines", "operation_log", "aws_accounts", "sso_config"]) {
+  for (const name of ["machines", "operation_log", "aws_accounts", "sso_config", "ssh_public_keys"]) {
     stub.createTable(name);
   }
   return stub;

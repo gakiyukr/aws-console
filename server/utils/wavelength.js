@@ -513,29 +513,89 @@ function randomInt(maxExclusive) {
   return array[0] % maxExclusive;
 }
 
-export function generateRootPassword() {
-  const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-  const lower = "abcdefghijkmnopqrstuvwxyz";
-  const digits = "23456789";
-  const symbols = "!@#$%^&*()-_=+[]{}";
-  const all = upper + lower + digits + symbols;
-  const required = [
-    upper[randomInt(upper.length)],
-    lower[randomInt(lower.length)],
-    digits[randomInt(digits.length)],
-    symbols[randomInt(symbols.length)],
-  ];
+// ─── 登入憑證 ───────────────────────────────────────────────
+// 部署憑證由使用者自訂：SSH 公鑰（存於 D1 公鑰庫）或自訂 root 密碼
+// （僅存在於單次請求，不落任何儲存）。金鑰與密碼的深度驗證集中於此，
+// 端點層只負責從 D1 或請求本體組出 credential 物件。
 
-  while (required.length < 24) {
-    required.push(all[randomInt(all.length)]);
+// 允許的 SSH 公鑰金鑰類型；不允許 options 前綴，縮小 authorized_keys 注入面
+const SSH_KEY_TYPES = [
+  "ssh-ed25519",
+  "ssh-rsa",
+  "ecdsa-sha2-nistp256",
+  "ecdsa-sha2-nistp384",
+  "ecdsa-sha2-nistp521",
+  "sk-ssh-ed25519@openssh.com",
+  "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+const SSH_PUBLIC_KEY_LINE = new RegExp(
+  `^(${SSH_KEY_TYPES.map((type) => type.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")}) [A-Za-z0-9+/=]+( [^\\s].*)?$`,
+);
+const SSH_KEY_MAX_LINES = 10;
+const SSH_KEY_MAX_LENGTH = 8192;
+const ROOT_PASSWORD_MIN_LENGTH = 8;
+const ROOT_PASSWORD_MAX_LENGTH = 128;
+
+/**
+ * 驗證多行 SSH 公鑰文字（設定頁入庫與部署解析共用）。
+ * @param {string} text 換行分隔的公鑰文字
+ * @returns {string[]} 逐行 trim 後的金鑰陣列
+ * @throws {WavelengthError} 格式無效、行數或長度超限時拋出（訊息繁中）
+ */
+export function validateSshPublicKeyText(text) {
+  if (typeof text !== "string" || text.trim().length === 0) {
+    throw new WavelengthError("SSH 公鑰不能為空");
   }
-
-  for (let index = required.length - 1; index > 0; index -= 1) {
-    const swapIndex = randomInt(index + 1);
-    [required[index], required[swapIndex]] = [required[swapIndex], required[index]];
+  if (text.length > SSH_KEY_MAX_LENGTH) {
+    throw new WavelengthError(`SSH 公鑰總長度不可超過 ${SSH_KEY_MAX_LENGTH} 字元`);
   }
+  const keys = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (keys.length === 0) {
+    throw new WavelengthError("SSH 公鑰不能為空");
+  }
+  if (keys.length > SSH_KEY_MAX_LINES) {
+    throw new WavelengthError(`SSH 公鑰最多 ${SSH_KEY_MAX_LINES} 把`);
+  }
+  for (const [index, key] of keys.entries()) {
+    if (!SSH_PUBLIC_KEY_LINE.test(key)) {
+      throw new WavelengthError(`SSH 公鑰格式無效：第 ${index + 1} 行`);
+    }
+  }
+  return keys;
+}
 
-  return required.join("");
+/**
+ * 解析並驗證部署請求攜帶的登入憑證。
+ * @param {{credential?: {type: "ssh_key", keys: string[]} | {type: "password", password: string}}} input
+ * @returns {{type: "ssh_key", keys: string[]} | {type: "password", password: string}}
+ * @throws {WavelengthError} 憑證缺漏、類型無效或內容不符規範時拋出
+ */
+export function resolveDeployCredential(input) {
+  const credential = input?.credential;
+  if (!credential || typeof credential !== "object") {
+    throw new WavelengthError("缺少登入憑證");
+  }
+  if (credential.type === "ssh_key") {
+    const keys = validateSshPublicKeyText(Array.isArray(credential.keys) ? credential.keys.join("\n") : "");
+    return { type: "ssh_key", keys };
+  }
+  if (credential.type === "password") {
+    const { password } = credential;
+    if (typeof password !== "string"
+      || password.length < ROOT_PASSWORD_MIN_LENGTH
+      || password.length > ROOT_PASSWORD_MAX_LENGTH) {
+      throw new WavelengthError(
+        `root 密碼長度必須為 ${ROOT_PASSWORD_MIN_LENGTH} 到 ${ROOT_PASSWORD_MAX_LENGTH} 字元`,
+      );
+    }
+    return { type: "password", password };
+  }
+  throw new WavelengthError("登入憑證類型無效，必須是 ssh_key 或 password");
+}
+
+/** 結果物件用的密碼欄位：僅密碼模式回填使用者輸入值，金鑰模式為空字串。 */
+function credentialPasswordValue(credential) {
+  return credential.type === "password" ? credential.password : "";
 }
 
 function quoteYamlString(text) {
@@ -547,12 +607,36 @@ function quoteYamlString(text) {
     .replaceAll("\t", "\\t")}"`;
 }
 
-export function buildCloudInit(rootPassword) {
-  const quotedRootPassword = quoteYamlString(rootPassword);
+/**
+ * 依憑證類型組出 cloud-init 的 YAML 前段與 sshd runcmd：
+ * - ssh_key 模式：寫入 root authorized_keys、停用密碼登入（ssh_pwauth false）
+ * - password 模式：chpasswd 設定 root 密碼、開放密碼登入（現行行為）
+ */
+function buildCredentialCloudInitBody(credential) {
+  if (credential.type === "ssh_key") {
+    // block literal 逐行輸出金鑰；金鑰內容不含換行，固定縮排即安全
+    const keyLines = credential.keys.map((key) => `      ${key}`).join("\n");
+    return {
+      preamble: `disable_root: false
+ssh_pwauth: false
 
-  return `#cloud-config
+write_files:
+  - path: /root/.ssh/authorized_keys
+    permissions: "0600"
+    content: |
+${keyLines}`,
+      runcmd: [
+        "chmod 700 /root/.ssh",
+        "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin without-password/' /etc/ssh/sshd_config",
+        "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config",
+        "systemctl restart ssh || systemctl restart sshd",
+      ],
+    };
+  }
 
-ssh_pwauth: true
+  const quotedRootPassword = quoteYamlString(credential.password);
+  return {
+    preamble: `ssh_pwauth: true
 disable_root: false
 
 chpasswd:
@@ -560,37 +644,42 @@ chpasswd:
   users:
     - name: root
       password: ${quotedRootPassword}
-      type: text
+      type: text`,
+    runcmd: [
+      "passwd -u root",
+      "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config",
+      "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+      "systemctl restart ssh || systemctl restart sshd",
+    ],
+  };
+}
+
+function formatRuncmd(commands) {
+  return commands.map((command) => `  - ${command}`).join("\n");
+}
+
+export function buildCloudInit(credential) {
+  const { preamble, runcmd } = buildCredentialCloudInitBody(credential);
+
+  return `#cloud-config
+
+${preamble}
 
 runcmd:
-  - passwd -u root
-  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart ssh || systemctl restart sshd
+${formatRuncmd(runcmd)}
   - echo ${WAVELENGTH_CLOUD_INIT_MARKER} >/dev/console
 `;
 }
 
-export function buildForwarderCloudInit(rootPassword, targetPrivateIp, listenPort) {
-  const quotedRootPassword = quoteYamlString(rootPassword);
+export function buildForwarderCloudInit(credential, targetPrivateIp, listenPort) {
+  const { preamble, runcmd } = buildCredentialCloudInitBody(credential);
 
   return `#cloud-config
 
-ssh_pwauth: true
-disable_root: false
-
-chpasswd:
-  expire: false
-  users:
-    - name: root
-      password: ${quotedRootPassword}
-      type: text
+${preamble}
 
 runcmd:
-  - passwd -u root
-  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart ssh || systemctl restart sshd
+${formatRuncmd(runcmd)}
   - sysctl -w net.ipv4.ip_forward=1
   - printf 'net.ipv4.ip_forward=1\\n' >/etc/sysctl.d/99-wavelength-forwarder.conf
   - iptables -t nat -A PREROUTING -p tcp --dport ${listenPort} -j DNAT --to-destination ${targetPrivateIp}:22
@@ -1328,7 +1417,7 @@ function buildLaunchedInstanceResult({
   subnetId,
   carrierGatewayId,
   routeTableId,
-  password,
+  credential,
   ready,
   waitError = "",
   forwarder = null,
@@ -1347,13 +1436,14 @@ function buildLaunchedInstanceResult({
     carrier_gateway_id: carrierGatewayId,
     route_table_id: routeTableId,
     username: "root",
-    password,
+    password: credentialPasswordValue(credential),
+    credential_type: credential.type,
     ssh_command: publicDnsName ? `ssh root@${publicDnsName}` : "",
     ...(forwarder ? { forwarder } : {}),
     ...(waitError
       ? {
           warning:
-            "執行個體已啟動，但就緒檢查未完成。請保存密碼，並前往 AWS 主控台檢查該執行個體。",
+            "執行個體已啟動，但就緒檢查未完成。請保存連線憑證，並前往 AWS 主控台檢查該執行個體。",
           wait_error: waitError,
         }
       : {}),
@@ -1369,7 +1459,7 @@ function buildRegionalInstanceResult({
   privateDnsName = "",
   subnetId,
   securityGroupId,
-  password,
+  credential,
   ready,
   waitError = "",
   instanceType = "",
@@ -1386,12 +1476,13 @@ function buildRegionalInstanceResult({
     subnet_id: subnetId,
     security_group_id: securityGroupId,
     username: "root",
-    password,
+    password: credentialPasswordValue(credential),
+    credential_type: credential.type,
     ssh_command: publicDnsName ? `ssh root@${publicDnsName}` : "",
     ...(waitError
       ? {
           warning:
-            "執行個體已啟動，但就緒檢查未完成。請保存密碼，並前往 AWS 主控台檢查該執行個體。",
+            "執行個體已啟動，但就緒檢查未完成。請保存連線憑證，並前往 AWS 主控台檢查該執行個體。",
           wait_error: waitError,
         }
       : {}),
@@ -1408,12 +1499,12 @@ async function launchForwarderInstance({
   image,
   instanceType,
   os,
-  password,
+  credential,
   targetPrivateIp,
   onProgress,
 }) {
   const listenPort = generateForwarderListenPort();
-  const userData = toBase64(buildForwarderCloudInit(password, targetPrivateIp, listenPort));
+  const userData = toBase64(buildForwarderCloudInit(credential, targetPrivateIp, listenPort));
   const runParams = {
     ImageId: image.imageId,
     InstanceType: instanceType,
@@ -1477,7 +1568,8 @@ async function launchForwarderInstance({
     vpc_id: vpc.vpcId,
     instance_type: instanceType,
     username: "root",
-    password,
+    password: credentialPasswordValue(credential),
+    credential_type: credential.type,
     listen_port: listenPort,
     target_private_ip: targetPrivateIp,
     target_port: 22,
@@ -1536,13 +1628,12 @@ export async function deployRegionalEc2Instance(env, input, /** @type {ProgressR
       security_group_id: securityGroupId,
     });
 
-    const password = generateRootPassword();
-    onProgress("root_password_generated", {
+    const credential = resolveDeployCredential(input);
+    onProgress("credentials_ready", {
       username: "root",
-      password,
-      purpose: "regional_ec2",
+      credential_type: credential.type,
     });
-    const userData = toBase64(buildCloudInit(password));
+    const userData = toBase64(buildCloudInit(credential));
     const runParams = {
       ImageId: image.imageId,
       InstanceType: regionalInstanceType,
@@ -1595,7 +1686,7 @@ export async function deployRegionalEc2Instance(env, input, /** @type {ProgressR
         privateDnsName: instance?.privateDnsName || "",
         subnetId: subnet.subnetId,
         securityGroupId,
-        password,
+        credential,
         ready: false,
         waitError: error.message || String(error),
         instanceType: regionalInstanceType,
@@ -1611,7 +1702,7 @@ export async function deployRegionalEc2Instance(env, input, /** @type {ProgressR
       privateDnsName: instance.privateDnsName,
       subnetId: subnet.subnetId,
       securityGroupId,
-      password,
+      credential,
       ready: true,
       instanceType: regionalInstanceType,
     });
@@ -1662,11 +1753,10 @@ export async function deployForwarderForExistingWavelengthInstance(env, input, /
       target_private_ip: target.privateIpAddress,
       target_port: 22,
     });
-    const password = generateRootPassword();
-    onProgress("root_password_generated", {
+    const credential = resolveDeployCredential(input);
+    onProgress("credentials_ready", {
       username: "root",
-      password,
-      purpose: "existing_wavelength_forwarder",
+      credential_type: credential.type,
     });
     const forwarder = await launchForwarderInstance({
       env,
@@ -1678,7 +1768,7 @@ export async function deployForwarderForExistingWavelengthInstance(env, input, /
       image,
       instanceType: regionalInstanceType,
       os: input.os,
-      password,
+      credential,
       targetPrivateIp: target.privateIpAddress,
       onProgress,
     });
@@ -1742,13 +1832,12 @@ export async function deployWavelengthInstance(env, input, /** @type {ProgressRe
       route_table_id: routeTableId,
       security_group_id: securityGroupId,
     });
-    const password = generateRootPassword();
-    onProgress("root_password_generated", {
+    const credential = resolveDeployCredential(input);
+    onProgress("credentials_ready", {
       username: "root",
-      password,
-      purpose: "wavelength_instance",
+      credential_type: credential.type,
     });
-    const userData = toBase64(buildCloudInit(password));
+    const userData = toBase64(buildCloudInit(credential));
     const runParams = {
       ImageId: image.imageId,
       InstanceType: input.instance_type,
@@ -1802,7 +1891,7 @@ export async function deployWavelengthInstance(env, input, /** @type {ProgressRe
           image,
           instanceType: getRegionalInstanceType(input),
           os: input.os,
-          password,
+          credential,
           targetPrivateIp: instance.privateIpAddress,
           onProgress,
         });
@@ -1816,7 +1905,7 @@ export async function deployWavelengthInstance(env, input, /** @type {ProgressRe
           subnetId: subnet.subnetId,
           carrierGatewayId,
           routeTableId,
-          password,
+          credential,
           ready: true,
           forwarder,
           instanceType: input.instance_type,
@@ -1839,7 +1928,7 @@ export async function deployWavelengthInstance(env, input, /** @type {ProgressRe
         subnetId: subnet.subnetId,
         carrierGatewayId,
         routeTableId,
-        password,
+        credential,
         ready: false,
         waitError: error.message || String(error),
         forwarder,
@@ -1857,7 +1946,7 @@ export async function deployWavelengthInstance(env, input, /** @type {ProgressRe
       subnetId: subnet.subnetId,
       carrierGatewayId,
       routeTableId,
-      password,
+      credential,
       ready: true,
       forwarder,
       instanceType: input.instance_type,
