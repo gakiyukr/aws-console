@@ -25,11 +25,8 @@ const user = computed(() => ({
   <Sidebar>
     <SidebarHeader>
       <LayoutSidebarNavHeader
-        :teams="[{
-          name: 'AWS Console',
-          logo: 'i-lucide-cloud-cog',
-          plan: 'Workers + D1',
-        }]"
+        name="AWS Console"
+        logo="i-lucide-cloud-cog"
       />
     </SidebarHeader>
     <SidebarContent>
