@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { CheckCircle2, KeyRound, Loader2, Pencil, Plus, Trash2 } from 'lucide-vue-next'
+import { CheckCircle2, Globe, KeyRound, Loader2, Pencil, Plus, Trash2 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import { regionLabel } from '~/lib/regions'
 
 useSeoMeta({ title: '帳號管理 - AWS 主控台' })
 
@@ -13,6 +14,28 @@ interface AwsAccount {
   lastVerifiedAt: string | null
 }
 
+// DescribeRegions(AllRegions=true) 回傳的 opt-in 狀態：
+// opt-in-not-required 為預設啟用區域，opted-in 為已開通的 opt-in 區域
+interface AccountRegion {
+  region: string
+  optInStatus: string
+}
+
+const regionStatusLabels: Record<string, string> = {
+  'opt-in-not-required': '預設啟用',
+  'opted-in': '已開通',
+  'not-opted-in': '未開通',
+}
+
+function regionStatusLabel(status: string) {
+  return regionStatusLabels[status] || '已啟用'
+}
+
+// 僅 not-opted-in 視為未啟用；空值與其餘狀態一律視為可部署，與後端過濾一致
+function isRegionActive(status: string) {
+  return status !== 'not-opted-in'
+}
+
 const accounts = ref<AwsAccount[]>([])
 const loading = ref(true)
 const saving = ref(false)
@@ -20,6 +43,16 @@ const testingId = ref<number | null>(null)
 const accountDialog = ref(false)
 const editingAccountId = ref<number | null>(null)
 const accountForm = reactive({ name: '', accessKeyId: '', secretAccessKey: '', sessionToken: '', enabled: true, isDefault: false })
+
+// 開通區域對話框：逐帳號列出全部 Region 與 opt-in 狀態，
+// 未啟用區域可逐個送出開通請求（EC2 EnableRegion）。
+const regionDialog = ref(false)
+const regionAccount = ref<AwsAccount | null>(null)
+const accountRegions = ref<AccountRegion[]>([])
+const loadingRegions = ref(false)
+const enablingRegion = ref<string | null>(null)
+const activeRegions = computed(() => accountRegions.value.filter(r => isRegionActive(r.optInStatus)))
+const inactiveRegions = computed(() => accountRegions.value.filter(r => !isRegionActive(r.optInStatus)))
 
 async function loadData() {
   loading.value = true
@@ -100,6 +133,46 @@ async function removeAccount(account: AwsAccount) {
   }
 }
 
+async function openRegionDialog(account: AwsAccount) {
+  regionAccount.value = account
+  regionDialog.value = true
+  await loadAccountRegions(account.id)
+}
+
+async function loadAccountRegions(accountId: number) {
+  loadingRegions.value = true
+  try {
+    const payload = await $fetch<{ regions: AccountRegion[] }>(`/api/accounts/${accountId}/regions`)
+    accountRegions.value = payload.regions || []
+  }
+  catch (error: any) {
+    toast.error(error?.data?.error || '載入區域清單失敗')
+  }
+  finally {
+    loadingRegions.value = false
+  }
+}
+
+async function enableRegion(region: string) {
+  if (!regionAccount.value)
+    return
+  enablingRegion.value = region
+  try {
+    const payload = await $fetch<{ message?: string }>(`/api/accounts/${regionAccount.value.id}/regions/enable`, {
+      method: 'POST',
+      body: { region },
+    })
+    toast.success(payload?.message || `已送出開通 ${region} 的請求`)
+    await loadAccountRegions(regionAccount.value.id)
+  }
+  catch (error: any) {
+    toast.error(error?.data?.error || `開通 ${region} 失敗`)
+  }
+  finally {
+    enablingRegion.value = null
+  }
+}
+
 onMounted(loadData)
 </script>
 
@@ -152,6 +225,9 @@ onMounted(loadData)
             最近驗證：{{ account.lastVerifiedAt ? new Date(account.lastVerifiedAt).toLocaleString('zh-TW') : '尚未驗證' }}
           </CardContent>
           <CardFooter class="justify-end gap-1 border-t pt-4">
+            <Button variant="ghost" size="icon" title="開通區域" @click="openRegionDialog(account)">
+              <Globe class="h-4 w-4" />
+            </Button>
             <Button variant="ghost" size="icon" title="測試憑證" :disabled="testingId === account.id" @click="testAccount(account)">
               <Loader2 v-if="testingId === account.id" class="h-4 w-4 animate-spin" /><CheckCircle2 v-else class="h-4 w-4" />
             </Button>
@@ -187,6 +263,55 @@ onMounted(loadData)
             取消
           </Button><Button :disabled="saving || !accountForm.name || (!editingAccountId && (!accountForm.accessKeyId || !accountForm.secretAccessKey))" @click="saveAccount">
             <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />儲存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="regionDialog">
+      <DialogContent class="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>開通新區域 — {{ regionAccount?.name }}</DialogTitle>
+          <DialogDescription>
+            列出此 AWS 帳號的全部 Region；開通 opt-in 區域後需數分鐘才可供部署。
+          </DialogDescription>
+        </DialogHeader>
+        <div v-if="loadingRegions" class="flex py-8 text-sm text-muted-foreground">
+          <Loader2 class="mr-2 h-4 w-4 animate-spin" />載入中...
+        </div>
+        <div v-else class="max-h-80 space-y-5 overflow-y-auto pr-1">
+          <div class="space-y-2">
+            <p class="text-sm font-medium">
+              可部署（{{ activeRegions.length }}）
+            </p>
+            <div v-for="r in activeRegions" :key="r.region" class="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+              <span class="text-sm">{{ regionLabel(r.region) }}</span>
+              <Badge variant="outline">
+                {{ regionStatusLabel(r.optInStatus) }}
+              </Badge>
+            </div>
+            <p v-if="!activeRegions.length" class="text-xs text-muted-foreground">
+              沒有已啟用的區域
+            </p>
+          </div>
+          <div class="space-y-2">
+            <p class="text-sm font-medium">
+              未啟用（{{ inactiveRegions.length }}）
+            </p>
+            <div v-for="r in inactiveRegions" :key="r.region" class="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+              <span class="text-sm">{{ regionLabel(r.region) }}</span>
+              <Button size="sm" variant="outline" :disabled="enablingRegion !== null" @click="enableRegion(r.region)">
+                <Loader2 v-if="enablingRegion === r.region" class="mr-2 h-4 w-4 animate-spin" />開通
+              </Button>
+            </div>
+            <p v-if="!inactiveRegions.length" class="text-xs text-muted-foreground">
+              所有區域皆已啟用
+            </p>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="regionDialog = false">
+            關閉
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -676,6 +676,31 @@ export async function listEc2Regions(env) {
     .sort();
 }
 
+/**
+ * 列出帳號的全部 AWS Region 與 opt-in 狀態（不過濾），
+ * 供帳號管理頁的開通區域功能呈現與操作。
+ * @returns {Promise<Array<{region: string, optInStatus: string}>>}
+ */
+export async function listAccountRegions(env) {
+  const xml = await ec2Query("us-east-1", env, "DescribeRegions", {
+    AllRegions: "true",
+  });
+  return parseRegionItems(xml)
+    .map(item => ({ region: item.regionName, optInStatus: item.optInStatus }))
+    .sort((a, b) => a.region.localeCompare(b.region));
+}
+
+/**
+ * 為帳號開通指定的 opt-in AWS Region。
+ * EC2 EnableRegion 屬帳號層級操作，一律送至 us-east-1；
+ * 開通程序由 AWS 於背景進行，需數分鐘後該區域才可供部署。
+ */
+export function enableAwsRegion(env, region) {
+  return ec2Query("us-east-1", env, "EnableRegion", {
+    RegionName: region,
+  });
+}
+
 export async function listWavelengthRegions(env) {
   const regions = await describeRegions(env);
 

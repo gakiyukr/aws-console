@@ -118,6 +118,25 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 Wavelength 初始化與部署流程另需 VPC、Subnet、Carrier Gateway、Route Table、
 Security Group 與 `ec2:RunInstances` 等權限；一般 EC2 部署亦需 `ec2:RunInstances`。
 
+帳號管理的「開通區域」功能需額外授予下列權限（EC2 EnableRegion 屬帳號層級
+操作，AWS 要求同時具備 EC2 與 Account 兩個命名空間的權限）：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeRegions",
+        "ec2:EnableRegion",
+        "account:EnableRegion"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
 
 `0002_seed_legacy_machine.sql` 會以 `INSERT OR IGNORE` 將舊版
 `ec2-power-console` 的 `SEA-1` 管理目標移入 D1；既有資料不會被覆寫或重複建立。

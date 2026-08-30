@@ -30,6 +30,7 @@ const actionLabels: Record<string, string> = {
   deploy_wavelength: '部署 Wavelength EC2',
   deploy_regional: '部署一般 EC2',
   deploy_forwarder: '部署 SSH forwarder',
+  enable_region: '開通 Region',
 }
 
 function errorMessage(error: any) {
