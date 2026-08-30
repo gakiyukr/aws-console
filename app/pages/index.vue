@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Loader2, Plus, RefreshCw } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import { regionLabel } from '~/lib/regions'
 
 useSeoMeta({
   title: '機器總覽 — AWS 主控台',
@@ -501,7 +502,7 @@ onMounted(loadMachines)
                 {{ loadingRegions ? '載入中...' : '請選擇地區' }}
               </option>
               <option v-for="region in regions" :key="region" :value="region">
-                {{ region }}
+                {{ regionLabel(region) }}
               </option>
             </select>
           </div>

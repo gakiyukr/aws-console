@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Check, Clipboard, Download, Loader2, RefreshCw, Trash2 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import { regionLabel } from '~/lib/regions'
 
 useSeoMeta({ title: 'Wavelength 部署 - AWS 主控台' })
 
@@ -424,7 +425,7 @@ onMounted(loadInitialOptions)
               請選擇 Region
             </option>
             <option v-for="region in regions" :key="region" :value="region">
-              {{ region }}
+              {{ regionLabel(region) }}
             </option>
           </select>
         </div>
