@@ -2254,7 +2254,8 @@ describe("deployWavelengthInstance", () => {
       event.password === result.password
     ), true);
     assert.equal(result.ssh_command, "");
-    assert.match(result.warning, /launched/i);
+    assert.match(result.warning, /已啟動/);
+    assert.match(result.warning, /就緒檢查未完成/);
     assert.match(result.wait_error, /running/i);
     assert.equal(calls.filter((call) => readAction(call.init) === "DescribeInstances").length, 60);
     assert.equal(sleepDelays.length, 59);
@@ -2328,7 +2329,7 @@ describe("deployWavelengthInstance", () => {
           instance_type: "t3.medium",
           os: "debian12",
         }),
-      /initialize/i,
+      /子網尚未初始化/,
     );
   });
 });

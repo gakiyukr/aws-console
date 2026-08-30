@@ -843,7 +843,7 @@ export async function listVpcOptions(env, region) {
     })
     .map((vpc) => ({
       value: vpc.vpcId,
-      label: `${vpc.vpcId}${vpc.isDefault ? " (default)" : ""} ${vpc.cidrBlock}`,
+      label: `${vpc.vpcId}${vpc.isDefault ? "（預設）" : ""} ${vpc.cidrBlock}`,
       cidr_block: vpc.cidrBlock,
       is_default: vpc.isDefault,
       name: vpc.name,
@@ -906,7 +906,7 @@ async function ensureWavelengthSubnet(env, region, vpc, zone, options = {}) {
 
   if (!createIfMissing) {
     throw new WavelengthError(
-      `Wavelength subnet is not initialized for ${zone}. Run zone initialization first.`,
+      `Wavelength 子網尚未初始化: ${zone}，請先執行 Zone 初始化`,
     );
   }
 
@@ -980,7 +980,7 @@ async function ensureCarrierGateway(env, region, vpcId, zone, options = {}) {
 
   if (!createIfMissing) {
     throw new WavelengthError(
-      `Carrier gateway is not initialized for ${zone}. Run zone initialization first.`,
+      `Carrier Gateway 尚未初始化: ${zone}，請先執行 Zone 初始化`,
     );
   }
 
@@ -1024,7 +1024,7 @@ async function ensureFullAccessSecurityGroup(env, region, vpcId, zone, options =
 
   if (!createIfMissing) {
     throw new WavelengthError(
-      `Security group is not initialized for ${zone}. Run zone initialization first.`,
+      `Security Group 尚未初始化: ${zone}，請先執行 Zone 初始化`,
     );
   }
 
@@ -1091,7 +1091,7 @@ async function ensureRouteTable(
   if (!routeTable) {
     if (!createIfMissing) {
       throw new WavelengthError(
-        `Route table is not initialized for ${zone}. Run zone initialization first.`,
+        `Route Table 尚未初始化: ${zone}，請先執行 Zone 初始化`,
       );
     }
     const createParams = {
@@ -1122,7 +1122,7 @@ async function ensureRouteTable(
   if (!defaultRoute) {
     if (!createIfMissing) {
       throw new WavelengthError(
-        `Route table default route is missing for ${zone}. Run zone initialization first.`,
+        `Route Table 缺少 0.0.0.0/0 預設路由: ${zone}，請先執行 Zone 初始化`,
       );
     }
     await ec2Query(region, env, "CreateRoute", {
@@ -1138,7 +1138,7 @@ async function ensureRouteTable(
   if (!associated) {
     if (!createIfMissing) {
       throw new WavelengthError(
-        `Route table association is missing for ${zone}. Run zone initialization first.`,
+        `Route Table 尚未關聯子網: ${zone}，請先執行 Zone 初始化`,
       );
     }
     await ec2Query(region, env, "AssociateRouteTable", {
@@ -1213,7 +1213,7 @@ async function waitForInstanceRunning(env, region, instanceId) {
     }
   }
 
-  throw new WavelengthError(`Instance ${instanceId} 未在期限內進入 running 狀態`);
+  throw new WavelengthError(`執行個體 ${instanceId} 未在期限內進入 running 狀態`);
 }
 
 async function waitForInstancePublicDns(env, region, instanceId) {
@@ -1236,7 +1236,7 @@ async function waitForInstancePublicDns(env, region, instanceId) {
     }
   }
 
-  throw new WavelengthError(`Instance ${instanceId} 未在期限內取得公網 DNS`);
+  throw new WavelengthError(`執行個體 ${instanceId} 未在期限內取得公網 DNS`);
 }
 
 async function waitForInstanceStatusOk(env, region, instanceId, onProgress = () => {}) {
@@ -1274,7 +1274,7 @@ async function waitForInstanceStatusOk(env, region, instanceId, onProgress = () 
     }
   }
 
-  throw new WavelengthError(`Instance ${instanceId} 狀態檢查未通過`);
+  throw new WavelengthError(`執行個體 ${instanceId} 狀態檢查未通過`);
 }
 
 async function waitForCloudInit(env, region, instanceId) {
@@ -1353,7 +1353,7 @@ function buildLaunchedInstanceResult({
     ...(waitError
       ? {
           warning:
-            "Instance was launched, but readiness checks did not complete. Save the password and inspect the instance in AWS.",
+            "執行個體已啟動，但就緒檢查未完成。請保存密碼，並前往 AWS 主控台檢查該執行個體。",
           wait_error: waitError,
         }
       : {}),
@@ -1391,7 +1391,7 @@ function buildRegionalInstanceResult({
     ...(waitError
       ? {
           warning:
-            "Instance was launched, but readiness checks did not complete. Save the password and inspect the instance in AWS.",
+            "執行個體已啟動，但就緒檢查未完成。請保存密碼，並前往 AWS 主控台檢查該執行個體。",
           wait_error: waitError,
         }
       : {}),
@@ -1909,7 +1909,7 @@ export async function initializeWavelengthZone(env, input) {
       carrier_gateway_id: carrierGatewayId,
       route_table_id: routeTableId,
       security_group_id: securityGroupId,
-      message: "Wavelength zone initialization completed.",
+      message: "Wavelength Zone 初始化完成",
     };
   } catch (error) {
     throw mapAwsError(error);
