@@ -1,4 +1,2 @@
--- 保留 ec2-power-console 原有的 TARGETS 管理清單；若使用者已手動加入，
--- UNIQUE 約束會避免重複資料。
-INSERT OR IGNORE INTO machines (region, instance_id, name, is_wavelength)
-VALUES ('us-west-2', 'i-0d50f2b47b60208cb', 'SEA-1', 0);
+-- 0002：原為將舊版 ec2-power-console 的 SEA-1 管理目標種子入 D1；
+-- 該機器已除役，保留空檔案以維持 migration 序號連續。

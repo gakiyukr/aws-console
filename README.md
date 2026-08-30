@@ -138,11 +138,10 @@ Security Group 與 `ec2:RunInstances` 等權限；一般 EC2 部署亦需 `ec2:R
 }
 ```
 
-`0002_seed_legacy_machine.sql` 會以 `INSERT OR IGNORE` 將舊版
-`ec2-power-console` 的 `SEA-1` 管理目標移入 D1；既有資料不會被覆寫或重複建立。
 `0003_accounts_and_users.sql` 會建立 AWS 帳號與主控台使用者資料表，並為機器及
 操作日誌加入 AWS 帳號關聯。建立第一個 AWS 帳號時，尚未關聯的舊機器會自動歸入該帳號。
 `0004_drop_console_users.sql` 於改用 SSO 後移除密碼使用者與登入限流資料表。
+`0005_sso_config.sql` 建立 OOBE 初始設定的 SSO 設定表。
 
 完成 D1 與 secrets 設定後執行：
 
