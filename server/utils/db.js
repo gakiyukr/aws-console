@@ -2,7 +2,12 @@
 // 使業務邏輯可在 node --test 以記憶體 D1 樁直接驗證。
 // 慣例：每個函式的第一個參數都是 D1 binding（env.DB），
 // 不在模組內持有任何連線狀態，以符合 Workers 每請求注入的模式。
-import { decryptOidcClientSecret, encryptOidcClientSecret } from "./credential-crypto.js";
+import {
+  decryptOidcClientSecret,
+  decryptPendingOidcClientSecret,
+  encryptOidcClientSecret,
+  encryptPendingOidcClientSecret,
+} from "./credential-crypto.js";
 
 // ─── 機器清單 ───────────────────────────────────────────────
 
@@ -313,4 +318,105 @@ export async function saveSsoConfig(db, config, encryptionKey) {
       VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
     .bind(config.issuer, config.authorizationEndpoint, config.tokenEndpoint, config.jwksUri, config.clientId, encrypted.clientSecretCiphertext, encrypted.clientSecretIv, config.allowedEmail)
     .run();
+}
+
+const PENDING_SSO_SETUP_TTL_MS = 10 * 60 * 1000;
+
+/** 將 OOBE 設定暫存於 D1；Client Secret 只以 pending 專用 AAD 加密保存。 */
+export async function savePendingSsoSetup(db, setup, encryptionKey, options = {}) {
+  const id = String(options.id || crypto.randomUUID());
+  const createdAt = Number.isFinite(options.createdAt) ? options.createdAt : Date.now();
+  const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : PENDING_SSO_SETUP_TTL_MS;
+  const expiresAt = createdAt + Math.max(1, ttlMs);
+  const encrypted = await encryptPendingOidcClientSecret(setup.clientSecret, encryptionKey);
+  await db.prepare(`INSERT INTO pending_sso_setup
+    (id, issuer, authorization_endpoint, token_endpoint, jwks_uri, client_id,
+     client_secret_ciphertext, client_secret_iv, allowed_email, created_at, expires_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`)
+    .bind(
+      id,
+      setup.issuer,
+      setup.authorizationEndpoint,
+      setup.tokenEndpoint,
+      setup.jwksUri,
+      setup.clientId,
+      encrypted.clientSecretCiphertext,
+      encrypted.clientSecretIv,
+      setup.allowedEmail,
+      createdAt,
+      expiresAt,
+    )
+    .run();
+  return { id, createdAt, expiresAt };
+}
+
+/** 讀取尚未完成 OOBE 驗證的設定；過期資料會視為不存在並清理。 */
+export async function getPendingSsoSetup(db, id, encryptionKey, now = Date.now()) {
+  if (!id) {
+    return null;
+  }
+  const row = await db.prepare(`SELECT id, issuer,
+    authorization_endpoint AS authorizationEndpoint, token_endpoint AS tokenEndpoint,
+    jwks_uri AS jwksUri, client_id AS clientId,
+    client_secret_ciphertext AS clientSecretCiphertext, client_secret_iv AS clientSecretIv,
+    allowed_email AS allowedEmail, created_at AS createdAt, expires_at AS expiresAt
+    FROM pending_sso_setup WHERE id = ?1`).bind(id).first();
+  if (!row) {
+    return null;
+  }
+  if (Number(row.expiresAt) <= now) {
+    await deletePendingSsoSetup(db, id);
+    return null;
+  }
+  const clientSecret = await decryptPendingOidcClientSecret(row, encryptionKey);
+  return { ...row, clientSecret };
+}
+
+/** 刪除指定的 pending OOBE 設定。 */
+export async function deletePendingSsoSetup(db, id) {
+  const result = await db.prepare("DELETE FROM pending_sso_setup WHERE id = ?1").bind(id).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/** 清理所有已過期的 pending OOBE 設定。 */
+export async function deleteExpiredPendingSsoSetups(db, now = Date.now()) {
+  const result = await db.prepare("DELETE FROM pending_sso_setup WHERE expires_at <= ?1").bind(now).run();
+  return result.meta.changes ?? 0;
+}
+
+/**
+ * 將已通過 OIDC 驗證的 pending 設定提升為正式設定。
+ * INSERT 與 DELETE 放在同一批次，並依賴 sso_config 的單列主鍵避免並行 OOBE 互相覆蓋。
+ */
+export async function activatePendingSsoSetup(db, id, encryptionKey, now = Date.now()) {
+  const pending = await getPendingSsoSetup(db, id, encryptionKey, now);
+  if (!pending) {
+    return { activated: false, reason: "not_found" };
+  }
+  const encrypted = await encryptOidcClientSecret(pending.clientSecret, encryptionKey);
+  try {
+    await db.batch([
+      db.prepare(`INSERT INTO sso_config
+        (id, issuer, authorization_endpoint, token_endpoint, jwks_uri, client_id,
+         client_secret_ciphertext, client_secret_iv, allowed_email)
+        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
+        .bind(
+          pending.issuer,
+          pending.authorizationEndpoint,
+          pending.tokenEndpoint,
+          pending.jwksUri,
+          pending.clientId,
+          encrypted.clientSecretCiphertext,
+          encrypted.clientSecretIv,
+          pending.allowedEmail,
+        ),
+      db.prepare("DELETE FROM pending_sso_setup WHERE id = ?1").bind(id),
+    ]);
+    return { activated: true };
+  } catch (error) {
+    if (String(error?.message || error).includes("UNIQUE")) {
+      return { activated: false, reason: "already_configured" };
+    }
+    throw error;
+  }
 }

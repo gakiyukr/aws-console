@@ -1,7 +1,8 @@
 // POST /api/setup/start：OOBE「開始 SSO 驗證」。以表單設定產生
-// state/nonce/PKCE（設定暫存於簽章 state cookie），回傳 IdP 授權
-// URL 供前端導向。完成驗證前設定不落 D1。
+// state/nonce/PKCE 與 pending 設定識別碼寫入簽章 state cookie，回傳 IdP 授權
+// URL 供前端導向；Client Secret 只以加密密文暫存於 D1。
 import { OidcError } from "../../lib/oidc-error.js";
+import { OidcConfigurationError } from "../../lib/oidc-configuration-error.js";
 import { errorResponse, jsonResponse, readJsonBody } from "../../utils/http.js";
 import {
   buildCallbackRedirectUri,
@@ -43,6 +44,12 @@ export default defineEventHandler(async (event) => {
     setHeader(event, "Set-Cookie", stateCookie);
     return jsonResponse({ redirectUrl });
   } catch (error) {
+    if (error instanceof OidcConfigurationError) {
+      return jsonResponse({
+        error: "服務目前無法儲存待驗證的 SSO 設定，請稍後再試。",
+        reason: error.reason,
+      }, { status: 503 });
+    }
     if (error instanceof OidcError && error.statusCode === 400) {
       return errorResponse(400, "設定內容無效，請檢查後再試。");
     }

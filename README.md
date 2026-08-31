@@ -37,7 +37,9 @@ pnpm dev:worker
 
 1. 填入**綁定 email**（完成驗證後僅此 email 能登入）與 IdP 資訊（Discovery URL，或三個明確端點）、Client ID／Secret。
 2. 「測試連線」會解析 IdP metadata 驗證設定。
-3. 「開始 SSO 驗證」導向 IdP 完成一次真實登入；**回頭的 email 與綁定 email 一致**時設定才會存入 D1（client secret 以 `CREDENTIAL_ENCRYPTION_KEY` 加密），並直接登入主控台。
+3. 「開始 SSO 驗證」會先把表單設定加密暫存至 D1，再導向 IdP 完成一次真實登入；**回頭的 email 與綁定 email 一致**時才提升為正式設定，並直接登入主控台。
+
+瀏覽器的 `oidc_state` Cookie 只保存隨機 pending ID、state、nonce 與 PKCE verifier，不保存 Client Secret 或其他 OIDC 設定。pending 設定使用獨立 AES-GCM AAD 加密，10 分鐘後失效。
 
 只有 `DB` binding、D1 migration、`SESSION_SECRET` 與 `CREDENTIAL_ENCRYPTION_KEY` 均正常，且 D1 確實沒有 SSO 設定資料列時才會進入 OOBE。基礎設施或解密失敗會顯示 `/503` 診斷頁，不會要求重新設定 SSO。
 
@@ -145,6 +147,7 @@ Security Group 與 `ec2:RunInstances` 等權限；一般 EC2 部署亦需 `ec2:R
 `0004_drop_console_users.sql` 於改用 SSO 後移除密碼使用者與登入限流資料表。
 `0005_sso_config.sql` 建立 OOBE 初始設定的 SSO 設定表。
 `0006_ssh_public_keys.sql` 建立部署用的 SSH 公鑰庫資料表。
+`0007_pending_sso_setup.sql` 建立 OOBE 驗證前的短效加密設定暫存表。
 
 完成 D1 與 secrets 設定後執行：
 

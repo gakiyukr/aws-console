@@ -6,10 +6,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createSignedValue } from "../server/utils/auth.js";
+import { createSignedValue, parseSignedValue } from "../server/utils/auth.js";
 import { OidcConfigurationError } from "../server/lib/oidc-configuration-error.js";
 import { OidcError } from "../server/lib/oidc-error.js";
-import { getSsoConfig, saveSsoConfig } from "../server/utils/db.js";
+import {
+  activatePendingSsoSetup,
+  getPendingSsoSetup,
+  getSsoConfig,
+  savePendingSsoSetup,
+  saveSsoConfig,
+} from "../server/utils/db.js";
 import {
   clearSsoConfigCache,
   completeLogin,
@@ -362,33 +368,41 @@ describe("OOBE 設定存取（D1）", () => {
 });
 
 describe("completeLogin 的 OOBE 流程", () => {
-  it("setup 暫存設定完成驗證後回傳 setup，email 不符時拒絕", async () => {
+  it("從 D1 pending 設定完成驗證後回傳 setup", async () => {
     const { env, issuer } = await makeRig();
+    const { id } = await savePendingSsoSetup(env.DB, {
+      issuer,
+      authorizationEndpoint: `${issuer}/authorize`,
+      tokenEndpoint: `${issuer}/token`,
+      jwksUri: `${issuer}/jwks`,
+      clientId: CLIENT_ID,
+      clientSecret: "client-secret",
+      allowedEmail: EMAIL,
+    }, ENCRYPTION_KEY);
     const stateValue = await createSignedValue(
-      {
-        state: "st-1",
-        nonce: "no-1",
-        verifier: "pkce-verifier",
-        setup: { ...VALID_SETUP_INPUT, issuer },
-      },
+      { state: "st-1", nonce: "no-1", verifier: "pkce-verifier", setupId: id },
       "session-secret",
     );
 
     const { email, setup } = await completeLogin(env, REDIRECT_URI, CALLBACK_QUERY, stateValue);
     assert.equal(email, EMAIL);
-    assert.equal(setup.email, EMAIL);
-    assert.equal(setup.clientSecret, "client-secret");
+    assert.equal(setup.id, id);
+    assert.equal(setup.clientSecret, undefined);
   });
 
-  it("setup 流程中 IdP 回傳的 email 與綁定 email 不符時拒絕", async () => {
+  it("OOBE 回呼 email 與 pending 綁定 email 不符時拒絕", async () => {
     const { env, issuer } = await makeRig({ claims: { email: "stranger@example.com" } });
+    const { id } = await savePendingSsoSetup(env.DB, {
+      issuer,
+      authorizationEndpoint: `${issuer}/authorize`,
+      tokenEndpoint: `${issuer}/token`,
+      jwksUri: `${issuer}/jwks`,
+      clientId: CLIENT_ID,
+      clientSecret: "client-secret",
+      allowedEmail: EMAIL,
+    }, ENCRYPTION_KEY);
     const stateValue = await createSignedValue(
-      {
-        state: "st-1",
-        nonce: "no-1",
-        verifier: "pkce-verifier",
-        setup: { ...VALID_SETUP_INPUT, issuer },
-      },
+      { state: "st-1", nonce: "no-1", verifier: "pkce-verifier", setupId: id },
       "session-secret",
     );
 
@@ -398,22 +412,91 @@ describe("completeLogin 的 OOBE 流程", () => {
     );
   });
 
-  it("setup 輸入在 cookie 內遭竄改（缺 client secret）時拒絕", async () => {
+  it("舊版把 setup 放入 cookie 時拒絕，避免接受瀏覽器中的 Client Secret", async () => {
     const { env } = await makeRig();
     const stateValue = await createSignedValue(
       {
         state: "st-1",
         nonce: "no-1",
         verifier: "pkce-verifier",
-        setup: { ...VALID_SETUP_INPUT, issuer: SETUP_ISSUER, clientSecret: "" },
+        setup: { ...VALID_SETUP_INPUT },
       },
       "session-secret",
     );
 
     await assert.rejects(
       completeLogin(env, REDIRECT_URI, CALLBACK_QUERY, stateValue),
-      (error) => error instanceof OidcError && error.code === "configuration",
+      (error) => error instanceof OidcError && error.code === "state_mismatch",
     );
+  });
+});
+
+describe("pending SSO setup D1 存取", () => {
+  it("加密儲存後可還原，且 state cookie 不含 Client Secret", async () => {
+    const { env, issuer } = await makeRig();
+    const result = await startLogin(env, REDIRECT_URI, { ...VALID_SETUP_INPUT, issuer });
+    const stateValue = decodeURIComponent(result.stateCookie.match(/^oidc_state=([^;]+)/)[1]);
+    const state = await parseSignedValue(stateValue, env.SESSION_SECRET);
+    assert.equal(typeof state.setupId, "string");
+    assert.equal(state.setup, undefined);
+    assert.equal(result.stateCookie.includes("client-secret"), false);
+
+    const pending = await getPendingSsoSetup(env.DB, state.setupId, ENCRYPTION_KEY);
+    assert.equal(pending.clientSecret, "client-secret");
+    const raw = await env.DB.prepare("SELECT client_secret_ciphertext AS ciphertext FROM pending_sso_setup WHERE id = ?1").bind(state.setupId).first();
+    assert.ok(raw.ciphertext);
+    assert.equal(raw.ciphertext.includes("client-secret"), false);
+  });
+
+  it("過期 pending 設定讀取時會被清理", async () => {
+    const db = createDb();
+    const now = Date.now();
+    const { id } = await savePendingSsoSetup(db, {
+      issuer: SETUP_ISSUER,
+      authorizationEndpoint: `${SETUP_ISSUER}/authorize`,
+      tokenEndpoint: `${SETUP_ISSUER}/token`,
+      jwksUri: `${SETUP_ISSUER}/jwks`,
+      clientId: CLIENT_ID,
+      clientSecret: "client-secret",
+      allowedEmail: EMAIL,
+    }, ENCRYPTION_KEY, { createdAt: now - 20_000, ttlMs: 10_000 });
+    assert.equal(await getPendingSsoSetup(db, id, ENCRYPTION_KEY, now), null);
+    assert.equal(await db.prepare("SELECT id FROM pending_sso_setup WHERE id = ?1").bind(id).first(), null);
+  });
+
+  it("驗證通過後原子啟用正式設定並刪除 pending 資料", async () => {
+    const db = createDb();
+    const { id } = await savePendingSsoSetup(db, {
+      issuer: SETUP_ISSUER,
+      authorizationEndpoint: `${SETUP_ISSUER}/authorize`,
+      tokenEndpoint: `${SETUP_ISSUER}/token`,
+      jwksUri: `${SETUP_ISSUER}/jwks`,
+      clientId: CLIENT_ID,
+      clientSecret: "client-secret",
+      allowedEmail: EMAIL,
+    }, ENCRYPTION_KEY);
+    const activation = await activatePendingSsoSetup(db, id, ENCRYPTION_KEY);
+    assert.equal(activation.activated, true);
+    assert.equal(await getPendingSsoSetup(db, id, ENCRYPTION_KEY), null);
+    assert.equal((await getSsoConfig(db, ENCRYPTION_KEY)).clientSecret, "client-secret");
+  });
+
+  it("正式設定已存在時，pending 啟用不會覆蓋原設定", async () => {
+    const db = createDb();
+    const config = {
+      issuer: SETUP_ISSUER,
+      authorizationEndpoint: `${SETUP_ISSUER}/authorize`,
+      tokenEndpoint: `${SETUP_ISSUER}/token`,
+      jwksUri: `${SETUP_ISSUER}/jwks`,
+      clientId: CLIENT_ID,
+      clientSecret: "original-secret",
+      allowedEmail: EMAIL,
+    };
+    await saveSsoConfig(db, config, ENCRYPTION_KEY);
+    const { id } = await savePendingSsoSetup(db, { ...config, clientSecret: "replacement-secret" }, ENCRYPTION_KEY);
+    const activation = await activatePendingSsoSetup(db, id, ENCRYPTION_KEY);
+    assert.deepEqual(activation, { activated: false, reason: "already_configured" });
+    assert.equal((await getSsoConfig(db, ENCRYPTION_KEY)).clientSecret, "original-secret");
   });
 });
 

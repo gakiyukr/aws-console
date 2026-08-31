@@ -5,7 +5,12 @@
 import * as oauth from "oauth4webapi";
 import { OidcConfigurationError } from "../lib/oidc-configuration-error.js";
 import { OidcError } from "../lib/oidc-error.js";
-import { getSsoConfig } from "./db.js";
+import {
+  deleteExpiredPendingSsoSetups,
+  getPendingSsoSetup,
+  getSsoConfig,
+  savePendingSsoSetup,
+} from "./db.js";
 import { createSignedValue, parseSignedValue } from "./auth.js";
 
 // state cookie 名稱；授權碼流程應在數分鐘內完成，逾時即作廢
@@ -24,7 +29,11 @@ let ssoDbConfigCache = { db: null, encryptionKey: "", resolution: null, checkedA
 
 function classifySsoStorageError(error) {
   const message = String(error?.message || error).toLowerCase();
-  if (message.includes("no such table") || (message.includes("sso_config") && message.includes("not found"))) {
+  if (
+    message.includes("no such table")
+    || (message.includes("sso_config") && message.includes("not found"))
+    || (message.includes("pending_sso_setup") && message.includes("not found"))
+  ) {
     return "sso_schema_missing";
   }
   if (message.includes("解密") || message.includes("credential_encryption_key")) {
@@ -306,17 +315,19 @@ export async function probeOidcSetup(setupInput, fetchImpl = fetch) {
  * 產生登入導向 URL 與 state cookie。
  * state/nonce/PKCE verifier 以 SESSION_SECRET 簽章存入短效 HttpOnly
  * cookie，callback 時比對 cookie 與 query，防偽造與 CSRF。
- * setupInput 存在時為 OOBE 流程：設定（含 client secret）暫存於
- * state cookie，完成驗證並比對 email 後才寫入 D1。
+ * setupInput 存在時為 OOBE 流程：設定先加密暫存於 D1，state cookie 僅保存
+ * pending 設定識別碼與 OAuth 檢查值。
  */
 export async function startLogin(env, redirectUri, setupInput = null) {
   let config;
+  let pendingEmail = null;
   if (setupInput) {
     const normalized = normalizeSetupInput(setupInput);
     if (normalized.error) {
       throw new OidcError("configuration", 400);
     }
     config = normalized.config;
+    pendingEmail = normalized.email;
   } else {
     if (!env?.SESSION_SECRET) {
       throw new OidcError("configuration", 503);
@@ -328,6 +339,25 @@ export async function startLogin(env, redirectUri, setupInput = null) {
   }
   const fetchImpl = env.__testHooks?.fetch || fetch;
   const as = await resolveAuthorizationServer(config, fetchImpl);
+
+  let setupId = null;
+  if (pendingEmail) {
+    try {
+      await deleteExpiredPendingSsoSetups(env.DB);
+      const pending = await savePendingSsoSetup(env.DB, {
+        issuer: as.issuer,
+        authorizationEndpoint: as.authorization_endpoint,
+        tokenEndpoint: as.token_endpoint,
+        jwksUri: as.jwks_uri,
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        allowedEmail: pendingEmail,
+      }, env.CREDENTIAL_ENCRYPTION_KEY);
+      setupId = pending.id;
+    } catch (error) {
+      throw new OidcConfigurationError(classifySsoStorageError(error));
+    }
+  }
 
   const state = oauth.generateRandomState();
   const nonce = oauth.generateRandomNonce();
@@ -353,7 +383,7 @@ export async function startLogin(env, redirectUri, setupInput = null) {
       state,
       nonce,
       verifier,
-      ...(setupInput ? { setup: setupInput } : {}),
+      ...(setupId ? { setupId } : {}),
     },
     env.SESSION_SECRET,
   );
@@ -374,8 +404,8 @@ export function buildClearedStateCookie() {
 /**
  * 處理 IdP callback：驗 state、交換授權碼並驗證 ID token（簽章、
  * iss/aud/exp 由 oauth4webapi 依 metadata 檢查、nonce 於此處傳入），
- * 最後比對 email 允許清單。OOBE 流程的允許清單為 setup 暫存的
- * 綁定 email。成功回傳 { email, setup }；setup 存在表示需寫入 D1。
+ * 最後比對 email 允許清單。OOBE 流程的允許清單來自 D1 pending 設定。
+ * 成功回傳 { email, setup }；setup 存在表示需啟用 pending 設定。
  */
 export async function completeLogin(env, redirectUri, query, stateValue) {
   if (!env?.SESSION_SECRET) {
@@ -392,14 +422,36 @@ export async function completeLogin(env, redirectUri, query, stateValue) {
     throw new OidcError("state_mismatch");
   }
 
-  const pendingSetup = stored.setup ?? null;
+  if (stored.setup) {
+    // 舊版 cookie 可能含有明文設定；不再接受，避免 secret 回到瀏覽器流程。
+    throw new OidcError("state_mismatch");
+  }
+  const pendingSetupId = typeof stored.setupId === "string" ? stored.setupId : null;
+  let pendingSetup = null;
   let config;
-  if (pendingSetup) {
-    const normalized = normalizeSetupInput(pendingSetup);
-    if (normalized.error) {
+  if (pendingSetupId) {
+    try {
+      pendingSetup = await getPendingSsoSetup(env.DB, pendingSetupId, env.CREDENTIAL_ENCRYPTION_KEY);
+    } catch (error) {
+      throw new OidcConfigurationError(classifySsoStorageError(error));
+    }
+    if (!pendingSetup) {
       throw new OidcError("configuration", 503);
     }
-    config = normalized.config;
+    try {
+      config = {
+        issuer: pendingSetup.issuer,
+        issuerUrl: new URL(pendingSetup.issuer),
+        clientId: pendingSetup.clientId,
+        clientSecret: pendingSetup.clientSecret,
+        allowedEmails: [pendingSetup.allowedEmail.toLowerCase()],
+        authorizationEndpoint: pendingSetup.authorizationEndpoint,
+        tokenEndpoint: pendingSetup.tokenEndpoint,
+        jwksUri: pendingSetup.jwksUri,
+      };
+    } catch {
+      throw new OidcError("configuration", 503);
+    }
   } else {
     config = await resolveOidcConfig(env);
     if (!config) {
@@ -461,22 +513,12 @@ export async function completeLogin(env, redirectUri, query, stateValue) {
 
   const claims = oauth.getValidatedIdTokenClaims(tokens);
   const email = String(claims?.email || "").toLowerCase();
-  const allowedEmails = pendingSetup ? [pendingSetup.email.toLowerCase()] : config.allowedEmails;
+  const allowedEmails = pendingSetup ? [pendingSetup.allowedEmail.toLowerCase()] : config.allowedEmails;
   if (!email || !allowedEmails.includes(email)) {
     throw new OidcError(pendingSetup ? "email_mismatch" : "email_not_allowed", 403);
   }
   return {
     email,
-    setup: pendingSetup
-      ? {
-          issuer: config.issuer,
-          authorizationUrl: config.authorizationEndpoint,
-          tokenUrl: config.tokenEndpoint,
-          jwksUrl: config.jwksUri,
-          clientId: config.clientId,
-          clientSecret: config.clientSecret,
-          email: pendingSetup.email,
-        }
-      : null,
+    setup: pendingSetup ? { id: pendingSetup.id } : null,
   };
 }

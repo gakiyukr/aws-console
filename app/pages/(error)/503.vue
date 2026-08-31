@@ -15,6 +15,8 @@ const reasonMessages: Record<string, string> = {
   sso_config_decryption_failed: 'SSO 設定無法解密，請確認加密主金鑰未被更換。',
   sso_config_invalid: 'D1 內的 SSO 設定格式無效。',
   sso_config_save_failed: 'SSO 設定無法寫入 D1。',
+  sso_config_already_exists: 'SSO 已由另一個設定流程完成，請重新登入。',
+  pending_sso_setup_missing: 'SSO 暫存設定已過期，請重新開始設定。',
   oidc_environment_invalid: 'OIDC 環境變數格式無效。',
   d1_unavailable: '目前無法讀取 D1，請稍後再試。',
   authentication_unavailable: '目前無法確認認證服務狀態。',

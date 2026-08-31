@@ -200,6 +200,12 @@ export class D1Stub {
     if (table === "ssh_public_keys" && rows.some(r => r.public_key === row.public_key)) {
       throw new Error("UNIQUE constraint failed: ssh_public_keys.public_key");
     }
+    if (table === "sso_config" && rows.some(r => r.id === row.id)) {
+      throw new Error("UNIQUE constraint failed: sso_config.id");
+    }
+    if (table === "pending_sso_setup" && rows.some(r => r.id === row.id)) {
+      throw new Error("UNIQUE constraint failed: pending_sso_setup.id");
+    }
     if (table === "aws_accounts") {
       Object.assign(row, {
         enabled: row.enabled ?? 1,
@@ -227,13 +233,34 @@ export class D1Stub {
 
   _delete(table, sql, bound) {
     const rows = this.tables.get(table) || [];
-    const whereMatch = sql.match(/WHERE (\w+) = (\?\d*|-?\d+|'[^']*')/i);
+    const whereMatch = sql.match(/WHERE (.+)$/i);
     if (!whereMatch) {
       throw new Error(`D1Stub 無法解析 DELETE: ${sql}`);
     }
-    const [, column, token] = whereMatch;
-    const value = this._resolveValue(token, bound, { index: 0 });
-    const remaining = rows.filter((row) => row[column] !== value);
+    const cursor = { index: 0 };
+    const conditions = whereMatch[1].split(/ AND /i).map((condition) => {
+      const match = condition.match(/^(\w+)\s*([<>]=|[=<>])\s*(\?\d*|-?\d+|'[^']*')$/);
+      if (!match) {
+        throw new Error(`D1Stub DELETE 條件無法解析: ${condition}`);
+      }
+      return {
+        column: match[1],
+        operator: match[2],
+        value: this._resolveValue(match[3], bound, cursor),
+      };
+    });
+    const matches = (row, condition) => {
+      const left = row[condition.column];
+      const right = condition.value;
+      switch (condition.operator) {
+        case "<=": return left <= right;
+        case ">=": return left >= right;
+        case "<": return left < right;
+        case ">": return left > right;
+        default: return left === right;
+      }
+    };
+    const remaining = rows.filter((row) => !conditions.every((condition) => matches(row, condition)));
     this.tables.set(table, remaining);
     return makeResult([], { changes: rows.length - remaining.length });
   }
@@ -290,10 +317,10 @@ export class D1Stub {
   }
 }
 
-/** 建立已套用 0001–0006 schema（空表）的樁。 */
+/** 建立已套用 0001–0007 schema（空表）的樁。 */
 export function createDb() {
   const stub = new D1Stub();
-  for (const name of ["machines", "operation_log", "aws_accounts", "sso_config", "ssh_public_keys"]) {
+  for (const name of ["machines", "operation_log", "aws_accounts", "sso_config", "ssh_public_keys", "pending_sso_setup"]) {
     stub.createTable(name);
   }
   return stub;
