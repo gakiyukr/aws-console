@@ -3,6 +3,7 @@
 // node --test 相容），本模組只負責組合流程、email 允許清單比對、
 // OOBE 初始設定的輸入正規化與測試用的 fetch 注入（env.__testHooks.fetch）。
 import * as oauth from "oauth4webapi";
+import { OidcConfigurationError } from "../lib/oidc-configuration-error.js";
 import { OidcError } from "../lib/oidc-error.js";
 import { getSsoConfig } from "./db.js";
 import { createSignedValue, parseSignedValue } from "./auth.js";
@@ -16,10 +17,37 @@ const SCOPE = "openid email profile";
 const DISCOVERY_TTL_MS = 600_000;
 const discoveryCache = { key: "", as: null, fetchedAt: 0 };
 
-// D1 內的 OOBE 設定以 isolate 快取 60 秒，避免每個請求都查 D1；
-// 儲存設定後呼叫 clearSsoConfigCache() 立即生效。
+// D1 內的 OOBE 設定狀態以 isolate 快取 60 秒，避免每個請求都查 D1；
+// 快取保留「已設定／未初始化／系統故障」三態，禁止把故障誤判為 OOBE。
 const SSO_DB_CACHE_TTL_MS = 60_000;
-let ssoDbConfigCache = { config: null, checkedAt: 0 };
+let ssoDbConfigCache = { db: null, encryptionKey: "", resolution: null, checkedAt: 0 };
+
+function classifySsoStorageError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  if (message.includes("no such table") || (message.includes("sso_config") && message.includes("not found"))) {
+    return "sso_schema_missing";
+  }
+  if (message.includes("解密") || message.includes("credential_encryption_key")) {
+    return "sso_config_decryption_failed";
+  }
+  return "d1_unavailable";
+}
+
+function configuredResolution(config, source) {
+  return { state: "configured", source, config };
+}
+
+function errorResolution(reason) {
+  return { state: "error", reason, config: null };
+}
+
+function isCredentialEncryptionKeyValid(value) {
+  try {
+    return atob(String(value)).length === 32;
+  } catch {
+    return false;
+  }
+}
 
 /** 組出 IdP callback 的 redirect URI。 */
 export function buildCallbackRedirectUri(origin) {
@@ -76,45 +104,99 @@ export function normalizeSetupInput(input) {
   };
 }
 
-/**
- * 解析生效的 OIDC 設定：D1 內的 OOBE 設定優先，其次退回環境變數。
- * D1 結果（含「未設定」狀態）快取 60 秒。
- */
-export async function resolveOidcConfig(env) {
-  if (env?.DB && env?.CREDENTIAL_ENCRYPTION_KEY) {
-    const now = Date.now();
-    if (now - ssoDbConfigCache.checkedAt > SSO_DB_CACHE_TTL_MS) {
-      let fromDb = null;
-      try {
-        const stored = await getSsoConfig(env.DB, env.CREDENTIAL_ENCRYPTION_KEY);
-        if (stored) {
-          fromDb = {
-            issuer: stored.issuer,
-            issuerUrl: new URL(stored.issuer),
-            clientId: stored.clientId,
-            clientSecret: stored.clientSecret,
-            allowedEmails: [stored.allowedEmail.toLowerCase()],
-            authorizationEndpoint: stored.authorizationEndpoint,
-            tokenEndpoint: stored.tokenEndpoint,
-            jwksUri: stored.jwksUri,
-          };
-        }
-      } catch {
-        // 解密失敗（如主金鑰已更換）視同未設定，走 fail closed
-        fromDb = null;
-      }
-      ssoDbConfigCache = { config: fromDb, checkedAt: now };
+/** 解析 OIDC 設定三態；只有 D1 正常且沒有任何設定時才是 unconfigured。 */
+async function resolveOidcConfiguration(env) {
+  const now = Date.now();
+  if (
+    ssoDbConfigCache.db === env?.DB
+    && ssoDbConfigCache.encryptionKey === env?.CREDENTIAL_ENCRYPTION_KEY
+    && now - ssoDbConfigCache.checkedAt <= SSO_DB_CACHE_TTL_MS
+    && ssoDbConfigCache.resolution
+  ) {
+    return ssoDbConfigCache.resolution;
+  }
+
+  let resolution;
+  if (!env?.DB) {
+    resolution = errorResolution("d1_binding_missing");
+  }
+  else if (!env.CREDENTIAL_ENCRYPTION_KEY) {
+    resolution = errorResolution("credential_encryption_key_missing");
+  }
+  else if (!isCredentialEncryptionKeyValid(env.CREDENTIAL_ENCRYPTION_KEY)) {
+    resolution = errorResolution("credential_encryption_key_invalid");
+  }
+  else {
+    let stored;
+    try {
+      stored = await getSsoConfig(env.DB, env.CREDENTIAL_ENCRYPTION_KEY);
+    } catch (error) {
+      resolution = errorResolution(classifySsoStorageError(error));
     }
-    if (ssoDbConfigCache.config) {
-      return ssoDbConfigCache.config;
+
+    if (!resolution && stored) {
+      try {
+        resolution = configuredResolution({
+          issuer: stored.issuer,
+          issuerUrl: new URL(stored.issuer),
+          clientId: stored.clientId,
+          clientSecret: stored.clientSecret,
+          allowedEmails: [stored.allowedEmail.toLowerCase()],
+          authorizationEndpoint: stored.authorizationEndpoint,
+          tokenEndpoint: stored.tokenEndpoint,
+          jwksUri: stored.jwksUri,
+        }, "d1");
+      } catch {
+        resolution = errorResolution("sso_config_invalid");
+      }
+    }
+
+    if (!resolution) {
+      try {
+        const fromEnvironment = getOidcConfig(env);
+        resolution = fromEnvironment
+          ? configuredResolution(fromEnvironment, "environment")
+          : { state: "unconfigured", config: null };
+      } catch {
+        resolution = errorResolution("oidc_environment_invalid");
+      }
     }
   }
-  return getOidcConfig(env);
+
+  ssoDbConfigCache = {
+    db: env?.DB || null,
+    encryptionKey: env?.CREDENTIAL_ENCRYPTION_KEY || "",
+    resolution,
+    checkedAt: now,
+  };
+  return resolution;
+}
+
+/** 回傳不含密鑰的 OIDC 設定狀態，供路由決定 OOBE 或 503。 */
+export async function getOidcConfigurationStatus(env) {
+  const resolution = await resolveOidcConfiguration(env);
+  return {
+    state: resolution.state,
+    ...(resolution.source ? { source: resolution.source } : {}),
+    ...(resolution.reason ? { reason: resolution.reason } : {}),
+  };
+}
+
+/**
+ * 解析生效的 OIDC 設定：D1 設定優先，其次退回環境變數。
+ * 未初始化回 null；D1、schema 或解密故障會拋出 OidcConfigurationError。
+ */
+export async function resolveOidcConfig(env) {
+  const resolution = await resolveOidcConfiguration(env);
+  if (resolution.state === "error") {
+    throw new OidcConfigurationError(resolution.reason);
+  }
+  return resolution.config;
 }
 
 /** 變更 D1 內 SSO 設定後呼叫，使設定快取立即失效。 */
 export function clearSsoConfigCache() {
-  ssoDbConfigCache = { config: null, checkedAt: 0 };
+  ssoDbConfigCache = { db: null, encryptionKey: "", resolution: null, checkedAt: 0 };
 }
 
 /**

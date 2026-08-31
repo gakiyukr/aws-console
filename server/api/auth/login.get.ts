@@ -2,12 +2,14 @@
 // state/nonce/PKCE verifier（簽章後存入短效 HttpOnly cookie），
 // 302 導向 IdP 授權端點。設定缺失時導回 /login 並帶錯誤代碼。
 import { OidcError } from "../../lib/oidc-error.js";
+import { OidcConfigurationError } from "../../lib/oidc-configuration-error.js";
 import {
   getSessionFromRequest,
   parseSessionValue,
 } from "../../utils/auth.js";
 import {
   buildCallbackRedirectUri,
+  getOidcConfigurationStatus,
   startLogin,
 } from "../../utils/oidc.js";
 
@@ -27,6 +29,17 @@ export default defineEventHandler(async (event) => {
     setHeader(event, "Set-Cookie", stateCookie);
     return sendRedirect(event, redirectUrl, 302);
   } catch (error) {
+    if (error instanceof OidcConfigurationError) {
+      return sendRedirect(event, `/503?reason=${encodeURIComponent(error.reason)}`, 302);
+    }
+    const oidcStatus = await getOidcConfigurationStatus(env);
+    if (oidcStatus.state === "error" || !secret) {
+      const reason = oidcStatus.state === "error" ? oidcStatus.reason : "session_secret_missing";
+      return sendRedirect(event, `/503?reason=${encodeURIComponent(reason)}`, 302);
+    }
+    if (oidcStatus.state === "unconfigured") {
+      return sendRedirect(event, "/setup", 302);
+    }
     const code = error instanceof OidcError ? error.code : "configuration";
     return sendRedirect(event, `/login?error=${encodeURIComponent(code)}`, 302);
   }

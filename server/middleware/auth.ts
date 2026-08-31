@@ -6,7 +6,7 @@
 //   頁面守衛直接驗 cookie，不經內部子請求——Workers 免費方案 CPU
 //   限制緊，SSR 內再打 /api/session 會超出限制。
 import { getSessionFromRequest, parseSessionValue } from "../utils/auth.js";
-import { isAllowedEmail, isOidcConfigured } from "../utils/oidc.js";
+import { getOidcConfigurationStatus, isAllowedEmail } from "../utils/oidc.js";
 
 // 不需認證的 API 路徑（相對於 /api）
 const PUBLIC_API_PATHS = new Set([
@@ -32,12 +32,22 @@ export default defineEventHandler(async (event) => {
 
     const env = event.context.cloudflare?.env;
     const secret = env?.SESSION_SECRET;
+    const oidcStatus = await getOidcConfigurationStatus(env);
 
-    // 未設定 secrets 或 OIDC 時直接拒絕，fail closed
-    if (!secret || !(await isOidcConfigured(env))) {
+    // API 不得把基礎設施故障回報成未設定；reason 只包含可公開的診斷代碼。
+    if (oidcStatus.state === "error" || !secret) {
+      const reason = oidcStatus.state === "error" ? oidcStatus.reason : "session_secret_missing";
       throw createError({
         statusCode: 503,
-        message: "伺服器尚未完成認證設定",
+        message: "認證服務目前無法使用",
+        data: { error: "認證服務目前無法使用", reason },
+      });
+    }
+    if (oidcStatus.state === "unconfigured") {
+      throw createError({
+        statusCode: 503,
+        message: "伺服器尚未完成 SSO 初始設定",
+        data: { error: "伺服器尚未完成 SSO 初始設定", reason: "sso_unconfigured" },
       });
     }
 
@@ -64,10 +74,20 @@ export default defineEventHandler(async (event) => {
 
   const env = event.context.cloudflare?.env;
   const secret = env?.SESSION_SECRET;
-  const oidcConfigured = await isOidcConfigured(env);
+  const oidcStatus = await getOidcConfigurationStatus(env);
+
+  const systemErrorReason = oidcStatus.state === "error"
+    ? oidcStatus.reason
+    : (!secret ? "session_secret_missing" : "");
+  if (systemErrorReason) {
+    if (path !== "/503") {
+      return sendRedirect(event, `/503?reason=${encodeURIComponent(systemErrorReason)}`, 302);
+    }
+    return;
+  }
 
   // 尚未完成 SSO 設定：受保護頁與登入頁都導向 OOBE
-  if (!oidcConfigured) {
+  if (oidcStatus.state === "unconfigured") {
     if (isProtectedPage || isLoginPage) {
       return sendRedirect(event, "/setup", 302);
     }

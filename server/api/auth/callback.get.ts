@@ -5,6 +5,7 @@
 // 綁定 email 一致，才將設定寫入 D1 並導向主控台；失敗導回 /setup
 // （尚未設定 SSO 時的失敗一定屬於 OOBE 流程）。
 import { OidcError } from "../../lib/oidc-error.js";
+import { OidcConfigurationError } from "../../lib/oidc-configuration-error.js";
 import { saveSsoConfig } from "../../utils/db.js";
 import {
   buildSessionCookie,
@@ -16,7 +17,7 @@ import {
   buildClearedStateCookie,
   clearSsoConfigCache,
   completeLogin,
-  isOidcConfigured,
+  getOidcConfigurationStatus,
   STATE_COOKIE,
 } from "../../utils/oidc.js";
 
@@ -46,8 +47,13 @@ export default defineEventHandler(async (event) => {
           allowedEmail: setup.email,
         }, env.CREDENTIAL_ENCRYPTION_KEY);
         clearSsoConfigCache();
-      } catch {
-        throw new OidcError("save_failed", 500);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new OidcConfigurationError(
+          message.includes("no such table")
+            ? "sso_schema_missing"
+            : "sso_config_save_failed",
+        );
       }
     }
 
@@ -58,10 +64,19 @@ export default defineEventHandler(async (event) => {
     ]);
     return sendRedirect(event, "/", 302);
   } catch (error) {
-    const code = error instanceof OidcError ? error.code : "verification_failed";
-    const setupFlow = code === "save_failed" || !(await isOidcConfigured(env));
-    const target = setupFlow ? "/setup" : "/login";
     setHeader(event, "Set-Cookie", buildClearedStateCookie());
+    if (error instanceof OidcConfigurationError) {
+      return sendRedirect(event, `/503?reason=${encodeURIComponent(error.reason)}`, 302);
+    }
+
+    const oidcStatus = await getOidcConfigurationStatus(env);
+    if (oidcStatus.state === "error" || !secret) {
+      const reason = oidcStatus.state === "error" ? oidcStatus.reason : "session_secret_missing";
+      return sendRedirect(event, `/503?reason=${encodeURIComponent(reason)}`, 302);
+    }
+
+    const code = error instanceof OidcError ? error.code : "verification_failed";
+    const target = oidcStatus.state === "unconfigured" ? "/setup" : "/login";
     return sendRedirect(event, `${target}?error=${encodeURIComponent(code)}`, 302);
   }
 });

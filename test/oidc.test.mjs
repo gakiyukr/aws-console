@@ -7,12 +7,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { createSignedValue } from "../server/utils/auth.js";
+import { OidcConfigurationError } from "../server/lib/oidc-configuration-error.js";
 import { OidcError } from "../server/lib/oidc-error.js";
 import { getSsoConfig, saveSsoConfig } from "../server/utils/db.js";
 import {
   clearSsoConfigCache,
   completeLogin,
   getOidcConfig,
+  getOidcConfigurationStatus,
   isAllowedEmail,
   isOidcConfigured,
   normalizeSetupInput,
@@ -25,6 +27,8 @@ import { createDb } from "./d1-stub.js";
 const CLIENT_ID = "console-client";
 const REDIRECT_URI = "https://console.example/api/auth/callback";
 const EMAIL = "me@example.com";
+// 32 位元組的固定測試主金鑰（Base64）
+const ENCRYPTION_KEY = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
 
 let issuerCounter = 0;
 
@@ -117,6 +121,8 @@ async function makeRig(options = {}) {
   };
 
   const env = {
+    DB: createDb(),
+    CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY,
     SESSION_SECRET: "session-secret",
     OIDC_ISSUER: issuer,
     OIDC_CLIENT_ID: CLIENT_ID,
@@ -138,9 +144,6 @@ function makeStateValue(overrides = {}, secret = "session-secret") {
 
 const CALLBACK_QUERY = { code: "auth-code", state: "st-1" };
 
-// 32 位元組的固定測試主金鑰（Base64）
-const ENCRYPTION_KEY = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
-
 const SETUP_ISSUER = "https://setup.example.com";
 const VALID_SETUP_INPUT = {
   email: EMAIL,
@@ -152,6 +155,8 @@ const VALID_SETUP_INPUT = {
 describe("getOidcConfig", () => {
   it("設定齊全時回傳正規化設定（email 轉小寫）", async () => {
     const env = {
+      DB: createDb(),
+      CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY,
       OIDC_ISSUER: "https://idp.example.com",
       OIDC_CLIENT_ID: CLIENT_ID,
       OIDC_CLIENT_SECRET: "s",
@@ -165,6 +170,8 @@ describe("getOidcConfig", () => {
 
   it("缺任一必填項時回 null 且視為未設定", async () => {
     const env = {
+      DB: createDb(),
+      CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY,
       OIDC_ISSUER: "https://idp.example.com",
       OIDC_CLIENT_ID: CLIENT_ID,
       OIDC_CLIENT_SECRET: "s",
@@ -173,6 +180,59 @@ describe("getOidcConfig", () => {
     assert.equal(getOidcConfig(env), null);
     assert.equal(await isOidcConfigured(env), false);
     assert.equal(await isAllowedEmail(env, EMAIL), false);
+  });
+});
+
+describe("OIDC 設定狀態", () => {
+  it("D1 binding 遺失時回報系統故障，不視為首次設定", async () => {
+    clearSsoConfigCache();
+    const status = await getOidcConfigurationStatus({ CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY });
+    assert.deepEqual(status, { state: "error", reason: "d1_binding_missing" });
+    await assert.rejects(
+      resolveOidcConfig({ CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY }),
+      error => error instanceof OidcConfigurationError && error.reason === "d1_binding_missing",
+    );
+  });
+
+  it("加密主金鑰遺失時回報系統故障", async () => {
+    const status = await getOidcConfigurationStatus({ DB: createDb() });
+    assert.deepEqual(status, { state: "error", reason: "credential_encryption_key_missing" });
+  });
+
+  it("加密主金鑰格式錯誤時不允許進入首次設定", async () => {
+    const status = await getOidcConfigurationStatus({
+      DB: createDb(),
+      CREDENTIAL_ENCRYPTION_KEY: "not-base64",
+    });
+    assert.deepEqual(status, { state: "error", reason: "credential_encryption_key_invalid" });
+  });
+
+  it("D1 正常且沒有 SSO 設定時才回報未初始化", async () => {
+    const env = { DB: createDb(), CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY };
+    assert.deepEqual(await getOidcConfigurationStatus(env), { state: "unconfigured" });
+    assert.equal(await resolveOidcConfig(env), null);
+    assert.equal(await isOidcConfigured(env), false);
+  });
+
+  it("migration 缺失與 D1 查詢失敗會保留不同診斷原因", async () => {
+    const schemaMissingDb = {
+      prepare() {
+        throw new Error("D1_ERROR: no such table: sso_config");
+      },
+    };
+    const unavailableDb = {
+      prepare() {
+        throw new Error("D1 service unavailable");
+      },
+    };
+    assert.deepEqual(
+      await getOidcConfigurationStatus({ DB: schemaMissingDb, CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY }),
+      { state: "error", reason: "sso_schema_missing" },
+    );
+    assert.deepEqual(
+      await getOidcConfigurationStatus({ DB: unavailableDb, CREDENTIAL_ENCRYPTION_KEY: ENCRYPTION_KEY }),
+      { state: "error", reason: "d1_unavailable" },
+    );
   });
 });
 
@@ -272,7 +332,7 @@ describe("OOBE 設定存取（D1）", () => {
     clearSsoConfigCache();
   });
 
-  it("重複儲存為單列 upsert，主金鑰不符時視同未設定", async () => {
+  it("重複儲存為單列 upsert，主金鑰不符時回報系統故障", async () => {
     const db = createDb();
     const config = {
       issuer: SETUP_ISSUER,
@@ -289,7 +349,14 @@ describe("OOBE 設定存取（D1）", () => {
 
     clearSsoConfigCache();
     const env = { DB: db, CREDENTIAL_ENCRYPTION_KEY: Buffer.from("ffffffffffffffffffffffffffffffff").toString("base64") };
-    assert.equal(await resolveOidcConfig(env), null);
+    assert.deepEqual(
+      await getOidcConfigurationStatus(env),
+      { state: "error", reason: "sso_config_decryption_failed" },
+    );
+    await assert.rejects(
+      resolveOidcConfig(env),
+      error => error instanceof OidcConfigurationError && error.reason === "sso_config_decryption_failed",
+    );
     clearSsoConfigCache();
   });
 });

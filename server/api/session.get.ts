@@ -4,21 +4,35 @@
 // 而非 401，避免前端把「尚未登入」當成請求錯誤處理。
 import { getSessionFromRequest, parseSessionValue } from "../utils/auth.js";
 import { jsonResponse } from "../utils/http.js";
+import { getOidcConfigurationStatus, isAllowedEmail } from "../utils/oidc.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
   const secret = env?.SESSION_SECRET;
+  const oidcStatus = await getOidcConfigurationStatus(env);
 
-  // secrets 未設定時視同未認證，與中介層的拒絕行為一致
-  if (!secret) {
-    return jsonResponse({ authenticated: false, user: null });
+  if (oidcStatus.state === "error" || !secret) {
+    return jsonResponse({
+      authenticated: false,
+      user: null,
+      configurationState: "error",
+      reason: oidcStatus.state === "error" ? oidcStatus.reason : "session_secret_missing",
+    }, { status: 503 });
+  }
+  if (oidcStatus.state === "unconfigured") {
+    return jsonResponse({
+      authenticated: false,
+      user: null,
+      configurationState: "unconfigured",
+    });
   }
 
   const session = getSessionFromRequest(event.node.req);
   const payload = session ? await parseSessionValue(session, secret) : null;
-  const authenticated = Boolean(payload?.email);
+  const authenticated = Boolean(payload?.email && await isAllowedEmail(env, payload.email));
   return jsonResponse({
     authenticated,
     user: authenticated ? { email: payload.email } : null,
+    configurationState: "configured",
   });
 });

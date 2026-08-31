@@ -72,6 +72,13 @@ watch(form, () => {
   testResult.value = null
 })
 
+function systemFailureReason(error: any) {
+  const status = Number(error?.statusCode || error?.status || error?.response?.status)
+  return status === 503
+    ? (typeof error?.data?.reason === 'string' ? error.data.reason : 'authentication_unavailable')
+    : ''
+}
+
 async function testConnection() {
   if (testing.value)
     return
@@ -88,6 +95,11 @@ async function testConnection() {
     testedOk.value = result.ok
   }
   catch (error: any) {
+    const reason = systemFailureReason(error)
+    if (reason) {
+      await navigateTo({ path: '/503', query: { reason } })
+      return
+    }
     testResult.value = { ok: false, message: error?.data?.error || '連線失敗' }
     testedOk.value = false
   }
@@ -108,6 +120,11 @@ async function startVerification() {
     await navigateTo(redirectUrl, { external: true })
   }
   catch (error: any) {
+    const reason = systemFailureReason(error)
+    if (reason) {
+      await navigateTo({ path: '/503', query: { reason } })
+      return
+    }
     toast.error(error?.data?.error || '無法啟動 SSO 驗證')
     starting.value = false
   }

@@ -39,6 +39,8 @@ pnpm dev:worker
 2. 「測試連線」會解析 IdP metadata 驗證設定。
 3. 「開始 SSO 驗證」導向 IdP 完成一次真實登入；**回頭的 email 與綁定 email 一致**時設定才會存入 D1（client secret 以 `CREDENTIAL_ENCRYPTION_KEY` 加密），並直接登入主控台。
 
+只有 `DB` binding、D1 migration、`SESSION_SECRET` 與 `CREDENTIAL_ENCRYPTION_KEY` 均正常，且 D1 確實沒有 SSO 設定資料列時才會進入 OOBE。基礎設施或解密失敗會顯示 `/503` 診斷頁，不會要求重新設定 SSO。
+
 設定完成後 `/setup` 會封鎖；重新設定需清除 D1 設定：
 
 ```bash

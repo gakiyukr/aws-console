@@ -5,14 +5,21 @@ import { OidcError } from "../../lib/oidc-error.js";
 import { errorResponse, jsonResponse, readJsonBody } from "../../utils/http.js";
 import {
   buildCallbackRedirectUri,
-  isOidcConfigured,
+  getOidcConfigurationStatus,
   probeOidcSetup,
   startLogin,
 } from "../../utils/oidc.js";
 
 export default defineEventHandler(async (event) => {
   const env = event.context.cloudflare?.env;
-  if (await isOidcConfigured(env)) {
+  const oidcStatus = await getOidcConfigurationStatus(env);
+  if (oidcStatus.state === "error") {
+    return jsonResponse({
+      error: "認證服務目前無法使用，請先修復部署設定。",
+      reason: oidcStatus.reason,
+    }, { status: 503 });
+  }
+  if (oidcStatus.state === "configured") {
     return errorResponse(409, "SSO 已完成設定；如需重新設定，請先清除 D1 內的 sso_config。");
   }
   if (!env?.SESSION_SECRET) {
