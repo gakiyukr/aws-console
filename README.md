@@ -61,7 +61,7 @@ pnpm exec wrangler --config .output/server/wrangler.json d1 execute DB --remote 
 
 ## Cloudflare 部署
 
-先建立 D1 資料庫，將取得的資料庫 ID 設為 `CLOUDFLARE_D1_DATABASE_ID`，並依需要調整 Worker 與資料庫名稱。設定完成後建立 Worker 產物並套用 migration：
+先建立 D1 資料庫。此專案已在 `nuxt.config.ts` 內保留目前 `aws-console` D1 的預設 ID，因此 GitHub 建置即使沒有本機 `.env`，仍會產生 `DB` binding。若要改用其他資料庫，請在建置環境覆寫 `CLOUDFLARE_D1_DATABASE_ID`，並依需要調整 Worker 與資料庫名稱。設定完成後建立 Worker 產物並套用 migration：
 
 ```bash
 pnpm exec wrangler d1 create aws-console

@@ -5,7 +5,10 @@ const buildEnv = (globalThis as {
 }).process?.env ?? {};
 const cloudflareWorkerName = buildEnv.CLOUDFLARE_WORKER_NAME || 'aws-console';
 const cloudflareD1DatabaseName = buildEnv.CLOUDFLARE_D1_DATABASE_NAME || 'aws-console';
-const cloudflareD1DatabaseId = buildEnv.CLOUDFLARE_D1_DATABASE_ID;
+// D1 ID 不是機密；保留專案預設值，避免 GitHub 建置缺少本機 .env 時遺失 DB binding。
+// 部署到其他資料庫時仍可由 CLOUDFLARE_D1_DATABASE_ID 覆寫。
+const defaultCloudflareD1DatabaseId = '95917b87-defb-4175-a060-875dc58d8796';
+const cloudflareD1DatabaseId = buildEnv.CLOUDFLARE_D1_DATABASE_ID || defaultCloudflareD1DatabaseId;
 const d1Databases = cloudflareD1DatabaseId
   ? [{
       binding: 'DB',
